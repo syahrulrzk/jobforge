@@ -3,6 +3,7 @@ import { COMPANY_TEMPLATES, CITIES, EMPLOYMENT_TYPES, JOB_ROLES, SOURCE_PROFILES
 import { buildDescription } from "./adapters";
 import { companyFingerprint, jobFingerprint, normalizeCompanyName, normalizeTitle, validateEmail } from "./pipeline";
 import { DELIVERY_ENDPOINT } from "./types";
+import { resolveLogoUrl } from "./logo";
 
 // ─────────────────────────────────────────────────────────────
 // JOBFORCE — Initial seed: sources, companies, historical jobs,
@@ -50,7 +51,7 @@ async function seed(): Promise<void> {
       create: {
         name: c.name,
         normalizedName: companyFingerprint(c.name),
-        logoUrl: `${c.website}/assets/logo.png`,
+        logoUrl: resolveLogoUrl(c.website) ?? `${c.website}/assets/logo.png`,
         website: c.website,
         profile: c.profile,
         industry: c.industry,

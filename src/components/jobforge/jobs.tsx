@@ -16,7 +16,7 @@ import { useApi } from "@/hooks/use-api";
 interface JobRow {
   id: string;
   title: string;
-  company: { id: string; name: string; logoUrl: string } | null;
+  company: { id: string; name: string; logoUrl: string; website: string | null } | null;
   source: { slug: string; name: string; url: string } | null;
   location: string | null;
   salaryMin: number | null;
@@ -180,7 +180,7 @@ export function JobsView({ live }: { live: boolean }) {
                     <TableCell>
                       {j.company ? (
                         <div className="flex items-center gap-2">
-                          <CompanyAvatar name={j.company.name} logoUrl={j.company.logoUrl} size={24} />
+                          <CompanyAvatar name={j.company.name} logoUrl={j.company.logoUrl} website={j.company.website} size={24} />
                           <span className="hidden max-w-[140px] truncate text-sm text-zinc-300 lg:inline">{j.company.name}</span>
                         </div>
                       ) : (
@@ -348,7 +348,7 @@ export function JobsView({ live }: { live: boolean }) {
                     {detail.company ? (
                       <>
                         <div className="flex items-center gap-3">
-                          <CompanyAvatar name={detail.company.name} logoUrl={detail.company.logoUrl} size={48} />
+                          <CompanyAvatar name={detail.company.name} logoUrl={detail.company.logoUrl} website={detail.company.website} size={48} />
                           <div>
                             <p className="font-semibold text-zinc-100">{detail.company.name}</p>
                             {detail.company.website && (

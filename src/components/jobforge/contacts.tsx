@@ -113,7 +113,7 @@ export function ContactsView({ live }: { live: boolean }) {
                     <TableCell>
                       {c.job.company ? (
                         <div className="flex items-center gap-2">
-                          <CompanyAvatar name={c.job.company.name} logoUrl={c.job.company.logoUrl} size={22} />
+                          <CompanyAvatar name={c.job.company.name} logoUrl={c.job.company.logoUrl} website={c.job.company.website} size={22} />
                           <span className="hidden max-w-[140px] truncate text-sm text-zinc-300 md:inline">{c.job.company.name}</span>
                         </div>
                       ) : "—"}

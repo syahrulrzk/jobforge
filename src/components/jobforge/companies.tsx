@@ -85,7 +85,7 @@ export function CompaniesView({ live }: { live: boolean }) {
               className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 text-left transition-colors hover:border-zinc-600"
             >
               <div className="flex items-start gap-3">
-                <CompanyAvatar name={c.name} logoUrl={c.logoUrl} size={40} />
+                <CompanyAvatar name={c.name} logoUrl={c.logoUrl} website={c.website} size={40} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-semibold text-zinc-100">{c.name}</p>
                   <p className="truncate text-[11px] text-zinc-500">{c.industry ?? "Industri belum diketahui"}</p>
@@ -120,7 +120,7 @@ export function CompaniesView({ live }: { live: boolean }) {
             <div>
               <SheetHeader className="border-b border-zinc-800 bg-zinc-900/50 p-5">
                 <div className="flex items-center gap-3">
-                  <CompanyAvatar name={detail.company.name} logoUrl={detail.company.logoUrl} size={48} />
+                  <CompanyAvatar name={detail.company.name} logoUrl={detail.company.logoUrl} website={detail.company.website} size={48} />
                   <div className="min-w-0">
                     <SheetTitle className="text-lg text-zinc-100">{detail.company.name}</SheetTitle>
                     {detail.company.website && (

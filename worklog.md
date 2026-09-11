@@ -40,3 +40,18 @@ Work Log:
 
 Stage Summary:
 - Dashboard console card = same height as Sources Health, logs scroll inside, no dead space, no over-extend
+---
+Task ID: 4
+Agent: Super Z (main)
+Task: Company logo enrichment during scraping (user request — PNG/link)
+
+Work Log:
+- Created src/lib/jobforge/logo.ts — domain extraction + provider chain (Clearbit → Google s2 favicons → DuckDuckGo), no API key, 4s timeout per provider
+- Created /api/logo/[domain] proxy route — streams first provider hit as image w/ cache headers + X-Logo-Provider; honest 404 when nothing found
+- Engine wiring: company create prefers resolveLogoUrl(website); enrichment fills/rescues dead /assets/logo.png links via resolver + logs; NEEDS_ENRICHMENT logo recovery now uses provider chain instead of fabricating fake URLs
+- seed.ts uses resolver for fresh DBs; scripts/backfill-logos.ts migrated all 30 existing companies to Clearbit links (coverage 30/30)
+- CompanyAvatar (ui-bits.tsx) rewritten: fallback chain stored logoUrl → /api/logo/{domain} → initials; ignores dead /assets/logo.png links; 5 call sites now pass website prop
+
+Stage Summary:
+- Logos flow end-to-end: scrape → enrich (provider chain) → DB logoUrl (PNG link) → UI render → Job Portal payload
+- Verified: /api/logo/tokopedia.com returns real PNG 4.4KB (google-s2 provider), fictional domain honest 404 + initials fallback, tsc clean, page HTTP 200

@@ -1,7 +1,8 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { extractDomain } from "@/lib/jobforge/logo";
 
 // ─────────────────────────────────────────────────────────────
 // JOBFORCE — shared UI bits: status badges, stat cards, helpers
@@ -62,7 +63,17 @@ export function StatusBadge({ status, className }: { status: string; className?:
   );
 }
 
-export function CompanyAvatar({ name, logoUrl, size = 32 }: { name: string; logoUrl?: string | null; size?: number }) {
+export function CompanyAvatar({
+  name,
+  logoUrl,
+  website,
+  size = 32,
+}: {
+  name: string;
+  logoUrl?: string | null;
+  website?: string | null;
+  size?: number;
+}) {
   const initials = name
     .replace(/^(PT|CV)\s+/i, "")
     .split(/\s+/)
@@ -70,13 +81,39 @@ export function CompanyAvatar({ name, logoUrl, size = 32 }: { name: string; logo
     .map((w) => w[0])
     .join("")
     .toUpperCase();
+
+  // fallback chain: stored logoUrl → logo proxy (Clearbit → Google → DuckDuckGo) → initials
+  const candidates: string[] = [];
+  if (logoUrl && !logoUrl.endsWith("/assets/logo.png")) candidates.push(logoUrl);
+  const domain = extractDomain(website);
+  if (domain) candidates.push(`/api/logo/${domain}`);
+
+  const [idx, setIdx] = useState(0);
+  useEffect(() => setIdx(0), [logoUrl, website]);
+
+  const cls = "rounded-md border border-zinc-700/60 bg-zinc-800 object-contain";
+  if (idx < candidates.length) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={candidates[idx]}
+        alt={`Logo ${name}`}
+        width={size}
+        height={size}
+        style={{ width: size, height: size }}
+        className={cls}
+        loading="lazy"
+        onError={() => setIdx((i) => i + 1)}
+      />
+    );
+  }
   return (
-    <Avatar style={{ width: size, height: size }} className="rounded-md border border-zinc-700/60 bg-zinc-800">
-      {logoUrl ? <AvatarImage src={logoUrl} alt={`Logo ${name}`} className="object-contain" /> : null}
-      <AvatarFallback className="rounded-md bg-gradient-to-br from-amber-500/80 to-amber-700/80 text-[10px] font-bold text-zinc-950">
-        {initials || "?"}
-      </AvatarFallback>
-    </Avatar>
+    <div
+      style={{ width: size, height: size }}
+      className={cn(cls, "flex shrink-0 items-center justify-center bg-gradient-to-br from-amber-500/80 to-amber-700/80 text-[10px] font-bold text-zinc-950")}
+    >
+      {initials || "?"}
+    </div>
   );
 }
 

@@ -10,6 +10,7 @@ import {
 } from "./pipeline";
 import { processBulkImport, generateRequestId } from "./portal";
 import { DELIVERY_ENDPOINT, SETTING_KEYS, type CanonicalJob } from "./types";
+import { extractDomain, resolveLogoUrl } from "./logo";
 
 // ─────────────────────────────────────────────────────────────
 // JOBFORCE — Worker Engine (PRD §22, §36, §41)
@@ -326,21 +327,28 @@ async function advanceStageBatches(): Promise<void> {
       ? await db.company.findUnique({ where: { normalizedName: companyFingerprint(rec.companyName) } })
       : null;
     if (!company && rec.companyName) {
+      // §11 enrichment — logo: provider-resolved PNG link first, raw source logo as backup
+      const resolvedLogo = resolveLogoUrl(rec.companyWebsite) ?? rec.companyLogoUrl ?? "";
       company = await db.company.create({
         data: {
           name: rec.companyName,
           normalizedName: companyFingerprint(rec.companyName),
-          logoUrl: rec.companyLogoUrl ?? "",
+          logoUrl: resolvedLogo,
           website: rec.companyWebsite,
           profile: rec.companyProfile ?? "Profil perusahaan belum tersedia.",
           industry: null,
         },
       });
-      await log("enrich", "info", `New company registered: ${company.name}`);
+      await log("enrich", "info", `New company registered: ${company.name}${resolvedLogo ? " — logo resolved" : ""}`);
     }
     // §11 enrichment — attempt logo/profile recovery from company website
     if (company) {
-      if (!company.logoUrl && rec.companyLogoUrl) {
+      const resolvedLogo = resolveLogoUrl(company.website ?? rec.companyWebsite);
+      if ((!company.logoUrl || company.logoUrl.endsWith("/assets/logo.png")) && resolvedLogo) {
+        await db.company.update({ where: { id: company.id }, data: { logoUrl: resolvedLogo, enrichedAt: new Date() } });
+        company = { ...company, logoUrl: resolvedLogo };
+        await log("enrich", "success", `Logo resolved via provider chain for ${company.name} (${extractDomain(company.website) ?? "?"})`);
+      } else if (!company.logoUrl && rec.companyLogoUrl) {
         await db.company.update({ where: { id: company.id }, data: { logoUrl: rec.companyLogoUrl, enrichedAt: new Date() } });
         company = { ...company, logoUrl: rec.companyLogoUrl };
       }
@@ -436,12 +444,16 @@ async function advanceStageBatches(): Promise<void> {
     const missingLogo = job.company && !job.company.logoUrl;
     const missingEmail = !job.contact;
     if (missingLogo && chance(0.4) && job.company) {
-      await db.company.update({
-        where: { id: job.company.id },
-        data: { logoUrl: `${job.company.website ?? "https://example.co.id"}/assets/logo.png`, enrichedAt: new Date() },
-      });
-      await log("enrich", "success", `Logo recovered for ${job.company.name} — re-validating job`, { jobId: job.id });
-      await db.job.update({ where: { id: job.id }, data: { status: "VALIDATING" } });
+      // logo recovery via provider chain (Clearbit → Google → DuckDuckGo) dari domain website
+      const recovered = resolveLogoUrl(job.company.website);
+      if (recovered) {
+        await db.company.update({
+          where: { id: job.company.id },
+          data: { logoUrl: recovered, enrichedAt: new Date() },
+        });
+        await log("enrich", "success", `Logo recovered via ${extractDomain(job.company.website) ?? "provider"} for ${job.company.name} — re-validating job`, { jobId: job.id });
+        await db.job.update({ where: { id: job.id }, data: { status: "VALIDATING" } });
+      }
     } else if (missingEmail && job.company && chance(0.25)) {
       const email = `hr@${(job.company.website ?? "example.co.id").replace(/^https?:\/\/(www\.)?/, "")}`;
       const v = validateEmail(email);
