@@ -6,13 +6,13 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { RefreshCcw } from "lucide-react";
-import { EmptyState, StatusBadge, dateTime, timeAgo } from "./ui-bits";
+import { EmptyState, StatusBadge, CompanyAvatar, dateTime, timeAgo } from "./ui-bits";
 import { useApi } from "@/hooks/use-api";
 
 interface DeliveryRow {
   id: string;
   requestId: string;
-  job: { id: string; title: string; status: string; company: { name: string } | null } | null;
+  job: { id: string; title: string; status: string; company: { name: string; logoUrl: string; website: string | null } | null } | null;
   endpoint: string;
   attempt: number;
   maxAttempts: number;
@@ -112,8 +112,20 @@ export function DeliveriesView({ live }: { live: boolean }) {
                   <TableRow key={d.id} className="border-zinc-800/60 hover:bg-zinc-800/30">
                     <TableCell><code className="rounded bg-zinc-800/80 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300">{d.requestId}</code></TableCell>
                     <TableCell className="max-w-[220px]">
-                      <p className="truncate text-sm text-zinc-200">{d.job?.title ?? "—"}</p>
-                      <p className="truncate text-[11px] text-zinc-500">{d.job?.company?.name ?? ""}</p>
+                      <div className="flex items-center gap-2">
+                        {d.job?.company && (
+                          <CompanyAvatar
+                            name={d.job.company.name}
+                            logoUrl={d.job.company.logoUrl}
+                            website={d.job.company.website}
+                            size={28}
+                          />
+                        )}
+                        <div className="min-w-0">
+                          <p className="truncate text-sm text-zinc-200">{d.job?.title ?? "—"}</p>
+                          <p className="truncate text-[11px] text-zinc-500">{d.job?.company?.name ?? ""}</p>
+                        </div>
+                      </div>
                     </TableCell>
                     <TableCell className="hidden font-mono text-[11px] text-zinc-400 md:table-cell">{d.endpoint}</TableCell>
                     <TableCell><StatusBadge status={d.status} /></TableCell>

@@ -20,7 +20,7 @@ export async function GET(req: NextRequest) {
     db.apiDelivery.findMany({
       where,
       include: {
-        job: { select: { id: true, title: true, status: true, company: { select: { name: true } } } },
+        job: { select: { id: true, title: true, status: true, company: { select: { name: true, logoUrl: true, website: true } } } },
       },
       orderBy: { createdAt: "desc" },
       skip: (page - 1) * pageSize,

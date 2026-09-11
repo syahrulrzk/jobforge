@@ -74,3 +74,24 @@ export async function fetchLogoPng(domain: string): Promise<LogoFetchResult | nu
   }
   return null;
 }
+
+/**
+ * Deterministic brand-colored SVG badge — last-resort "logo" so every
+ * domain renders something visual even when no provider has the brand.
+ * Same domain always yields the same color + label.
+ */
+export function generateLogoBadge(domain: string): string {
+  let hash = 0;
+  for (let i = 0; i < domain.length; i++) {
+    hash = (hash * 31 + domain.charCodeAt(i)) >>> 0;
+  }
+  const hue = hash % 360;
+  const hue2 = (hue + 42) % 360;
+  const label =
+    domain
+      .split(".")[0]
+      .replace(/[^a-z0-9]/g, "")
+      .slice(0, 2)
+      .toUpperCase() || "?";
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="hsl(${hue},72%,52%)"/><stop offset="1" stop-color="hsl(${hue2},68%,38%)"/></linearGradient></defs><rect width="128" height="128" rx="26" fill="url(#g)"/><text x="64" y="66" font-family="Arial, Helvetica, sans-serif" font-size="50" font-weight="700" fill="rgba(255,255,255,0.95)" text-anchor="middle" dominant-baseline="central">${label}</text></svg>`;
+}

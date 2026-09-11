@@ -67,3 +67,19 @@ Work Log:
 
 Stage Summary:
 - Dashboard now displays company logos via Top Companies leaderboard (logo fallback: stored URL → /api/logo proxy → initials)
+---
+Task ID: 6
+Agent: Super Z (main)
+Task: Logos not showing (fictional domains 404) + logos in API Deliveries + logo_url in portal JSON
+
+Work Log:
+- Root cause "logo ga muncul": all 30 demo companies are fictional → Clearbit/Google/DDG all 404 → UI fell back to plain initials
+- Added generateLogoBadge(domain) to logo.ts — deterministic gradient SVG badge (hue from domain hash, 2-letter label)
+- /api/logo/[domain] now ALWAYS returns an image: provider chain → generated SVG badge (200, image/svg+xml, cached); no more 404/blank logos
+- API Deliveries: company select now includes logoUrl + website; deliveries.tsx renders CompanyAvatar (28px) next to job title
+- Portal JSON payload: verified canonicalJobSchema requires logo_url (z.string().min(1)) and engine already sends company.logo_url — live POST /api/v1/jobs/import with logo_url returned success:true created:1
+
+Stage Summary:
+- Every company now renders a logo everywhere (real logo via providers, or generated badge for unknown/fictional brands)
+- API Deliveries view shows logos per delivery row
+- logo_url is mandatory+validated in the portal import payload — proven end-to-end with live import

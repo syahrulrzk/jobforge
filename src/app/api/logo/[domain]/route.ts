@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { extractDomain, fetchLogoPng } from "@/lib/jobforge/logo";
+import { extractDomain, fetchLogoPng, generateLogoBadge } from "@/lib/jobforge/logo";
 
 export const dynamic = "force-dynamic";
 
@@ -14,16 +14,25 @@ export async function GET(_req: NextRequest, ctx: { params: Promise<{ domain: st
   }
 
   const hit = await fetchLogoPng(domain);
-  if (!hit) {
-    return NextResponse.json({ error: "Logo not found", domain }, { status: 404 });
+  if (hit) {
+    return new NextResponse(hit.body, {
+      status: 200,
+      headers: {
+        "Content-Type": hit.contentType,
+        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
+        "X-Logo-Provider": hit.provider,
+        "X-Logo-Domain": domain,
+      },
+    });
   }
 
-  return new NextResponse(hit.body, {
+  // no provider has this brand — deterministic generated badge (always renders)
+  return new NextResponse(generateLogoBadge(domain), {
     status: 200,
     headers: {
-      "Content-Type": hit.contentType,
+      "Content-Type": "image/svg+xml",
       "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800",
-      "X-Logo-Provider": hit.provider,
+      "X-Logo-Provider": "generated",
       "X-Logo-Domain": domain,
     },
   });
