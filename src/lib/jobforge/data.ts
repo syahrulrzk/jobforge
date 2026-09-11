@@ -119,6 +119,12 @@ export interface SourceProfile {
 }
 
 export const SOURCE_PROFILES: SourceProfile[] = [
+  // ── REAL boards (public job APIs, live data) ──
+  { slug: "remotive", name: "Remotive", baseUrl: "https://remotive.com", type: "PUBLIC_SOURCE", scraperType: "API", schedule: "hourly", minJobs: 20, maxJobs: 30, salaryChance: 0.4, missingLogoChance: 0, suffixTitleChance: 0, intraDupChance: 0 },
+  { slug: "jobicy", name: "Jobicy", baseUrl: "https://jobicy.com", type: "PUBLIC_SOURCE", scraperType: "API", schedule: "hourly", minJobs: 20, maxJobs: 30, salaryChance: 0.3, missingLogoChance: 0, suffixTitleChance: 0, intraDupChance: 0 },
+  { slug: "arbeitnow", name: "Arbeitnow", baseUrl: "https://www.arbeitnow.com", type: "PUBLIC_SOURCE", scraperType: "API", schedule: "every_6_hours", minJobs: 15, maxJobs: 30, salaryChance: 0.1, missingLogoChance: 1, suffixTitleChance: 0, intraDupChance: 0 },
+  { slug: "remoteok", name: "RemoteOK", baseUrl: "https://remoteok.com", type: "PUBLIC_SOURCE", scraperType: "API", schedule: "every_6_hours", minJobs: 15, maxJobs: 30, salaryChance: 0.25, missingLogoChance: 0.4, suffixTitleChance: 0, intraDupChance: 0 },
+  // ── Legacy simulation boards (mock generator) ──
   { slug: "jobstreet", name: "JobStreet", baseUrl: "https://www.jobstreet.co.id", type: "JOB_PORTAL", scraperType: "DYNAMIC", schedule: "every_6_hours", minJobs: 14, maxJobs: 30, salaryChance: 0.55, missingLogoChance: 0.06, suffixTitleChance: 0.5, intraDupChance: 0.1 },
   { slug: "glints", name: "Glints", baseUrl: "https://glints.com", type: "JOB_PORTAL", scraperType: "DYNAMIC", schedule: "every_6_hours", minJobs: 10, maxJobs: 22, salaryChance: 0.7, missingLogoChance: 0.05, suffixTitleChance: 0.2, intraDupChance: 0.08 },
   { slug: "indeed", name: "Indeed", baseUrl: "https://id.indeed.com", type: "JOB_PORTAL", scraperType: "DYNAMIC", schedule: "every_12_hours", minJobs: 12, maxJobs: 26, salaryChance: 0.4, missingLogoChance: 0.12, suffixTitleChance: 0.35, intraDupChance: 0.15 },

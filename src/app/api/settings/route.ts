@@ -24,6 +24,8 @@ export async function GET() {
       autoDelivery: map[SETTING_KEYS.autoDelivery] !== "false",
       tickIntervalMs: map[SETTING_KEYS.tickIntervalMs] ?? "5000",
       demoJobCap: map[SETTING_KEYS.demoJobCap] ?? "800",
+      dataMode: map[SETTING_KEYS.dataMode] ?? "real",
+      enginePool: map[SETTING_KEYS.enginePool] ?? "cheerio,crawlee,puppeteer,selenium",
     },
   });
 }
@@ -47,6 +49,15 @@ export async function PUT(req: NextRequest) {
   if (b.autoDelivery !== undefined) updates.push([SETTING_KEYS.autoDelivery, String(Boolean(b.autoDelivery))]);
   if (b.tickIntervalMs !== undefined) updates.push([SETTING_KEYS.tickIntervalMs, String(Math.min(60000, Math.max(2000, parseInt(String(b.tickIntervalMs), 10) || 5000)))]);
   if (b.demoJobCap !== undefined) updates.push([SETTING_KEYS.demoJobCap, String(Math.min(5000, Math.max(100, parseInt(String(b.demoJobCap), 10) || 800)))]);
+  if (b.dataMode !== undefined) updates.push([SETTING_KEYS.dataMode, b.dataMode === "mock" ? "mock" : "real"]);
+  if (b.enginePool !== undefined) {
+    const valid = ["cheerio", "crawlee", "puppeteer", "selenium"];
+    const requested = String(b.enginePool)
+      .split(",")
+      .map((k) => k.trim().toLowerCase())
+      .filter((k) => valid.includes(k));
+    updates.push([SETTING_KEYS.enginePool, requested.length > 0 ? requested.join(",") : valid.join(",")]);
+  }
 
   for (const [key, value] of updates) {
     await db.setting.upsert({ where: { key }, update: { value }, create: { key, value } });

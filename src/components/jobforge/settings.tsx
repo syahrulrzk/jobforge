@@ -18,6 +18,8 @@ interface SettingsData {
     autoDelivery: boolean;
     tickIntervalMs: string;
     demoJobCap: string;
+    dataMode: string;
+    enginePool: string;
   };
 }
 
@@ -49,6 +51,7 @@ export function SettingsView() {
           autoDelivery: data.autoDelivery,
           tickIntervalMs: data.tickIntervalMs,
           demoJobCap: data.demoJobCap,
+          dataMode: data.dataMode,
         }),
       });
       if (!res.ok) throw new Error("Gagal menyimpan");
@@ -145,6 +148,29 @@ export function SettingsView() {
           <h3 className="text-sm font-semibold text-zinc-200">Worker Engine</h3>
         </div>
         <div className="space-y-5">
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3.5 py-3">
+            <p className="text-sm font-medium text-zinc-200">Mode Data</p>
+            <p className="mb-2.5 text-[11px] text-zinc-500">REAL menarik lowongan live dari API publik board — MOCK memakai generator simulasi</p>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { v: "real", label: "REAL — Live API", hint: "Remotive · Jobicy · Arbeitnow · RemoteOK" },
+                { v: "mock", label: "MOCK — Generator", hint: "Data simulasi untuk demo pipeline" },
+              ].map((opt) => (
+                <button
+                  key={opt.v}
+                  onClick={() => setData({ ...data, dataMode: opt.v })}
+                  className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                    data.dataMode === opt.v
+                      ? "border-amber-500/50 bg-amber-500/10 text-amber-200"
+                      : "border-zinc-800 bg-zinc-900/50 text-zinc-400 hover:border-zinc-700"
+                  }`}
+                >
+                  <p className="text-xs font-semibold">{opt.label}</p>
+                  <p className="mt-0.5 text-[10px] leading-snug opacity-70">{opt.hint}</p>
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-900/50 px-3.5 py-3">
             <div>
               <p className="text-sm font-medium text-zinc-200">Auto Scrape</p>

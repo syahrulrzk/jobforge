@@ -1,8 +1,43 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { ensureBootstrap } from "@/lib/jobforge/bootstrap";
+import { log } from "@/lib/jobforge/engine";
 
 export const dynamic = "force-dynamic";
+
+// PATCH /api/jobs/:id — operator actions (PRD §31 manual ops)
+// { action: "force_ready" } — manual override for jobs stuck in NEEDS_ENRICHMENT:
+// assigns the sandbox relay contact and pushes the job to READY for delivery.
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  await ensureBootstrap();
+  const { id } = await ctx.params;
+  const body = await req.json().catch(() => null);
+  if ((body as { action?: string } | null)?.action !== "force_ready") {
+    return NextResponse.json({ error: "Unknown action" }, { status: 422 });
+  }
+  const job = await db.job.findUnique({ where: { id }, include: { contact: true } });
+  if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
+  if (!["NEEDS_ENRICHMENT", "VALIDATING", "ENRICHING", "PROCESSING"].includes(job.status)) {
+    return NextResponse.json({ error: `Job berstatus ${job.status} — tidak perlu override` }, { status: 409 });
+  }
+  if (!job.contact) {
+    await db.jobContact.create({
+      data: {
+        jobId: job.id,
+        hrEmail: "talent@relay.jobforge.local",
+        emailSourceUrl: null,
+        emailVerified: false,
+        emailStatus: "UNKNOWN",
+      },
+    });
+  }
+  await db.job.update({
+    where: { id: job.id },
+    data: { status: "READY", statusReason: "Manual operator override (§31) — HR email pakai relay sandbox" },
+  });
+  await log("enrich", "info", `Operator override → READY (manual): ${job.title}`, { jobId: job.id });
+  return NextResponse.json({ ok: true });
+}
 
 // GET /api/jobs/:id — full job detail incl. canonical JSON (PRD §29)
 export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {

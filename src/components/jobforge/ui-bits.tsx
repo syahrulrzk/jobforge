@@ -119,14 +119,20 @@ export function CompanyAvatar({
 
 export function formatIDR(min?: number | null, max?: number | null, currency?: string | null): string {
   if (!min && !max) return "—";
+  // international boards (USD/EUR) — compact western format, not jt/rb
+  if (currency && currency !== "IDR") {
+    const cf = (v: number) =>
+      new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 0 }).format(v);
+    if (min && max && min !== max) return `${currency} ${cf(min)} – ${cf(max)}`;
+    return `${currency} ${cf(min ?? max ?? 0)}`;
+  }
   const fmt = (v: number) => {
     if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(v % 1_000_000 === 0 ? 0 : 1).replace(".", ",")}jt`;
     if (v >= 1_000) return `${Math.round(v / 1_000)}rb`;
     return String(v);
   };
-  const cur = currency ?? "IDR";
-  if (min && max && min !== max) return `${cur} ${fmt(min)} – ${fmt(max)}`;
-  return `${cur} ${fmt(min ?? max ?? 0)}`;
+  if (min && max && min !== max) return `IDR ${fmt(min)} – ${fmt(max)}`;
+  return `IDR ${fmt(min ?? max ?? 0)}`;
 }
 
 export function timeAgo(input: string | Date | null | undefined): string {

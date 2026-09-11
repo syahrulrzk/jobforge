@@ -7,10 +7,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { EmptyState, StatusBadge, duration, timeAgo } from "./ui-bits";
 import { useApi } from "@/hooks/use-api";
+import { ENGINES, type EngineKey } from "@/lib/jobforge/engines";
 
 interface RunRow {
   id: string;
   source: { id: string; name: string; slug: string; scraperType: string };
+  engine: string | null;
   startedAt: string;
   finishedAt: string | null;
   durationMs: number | null;
@@ -79,6 +81,7 @@ export function RunsView({ live }: { live: boolean }) {
             <TableHeader className="sticky top-0 z-10 bg-zinc-900">
               <TableRow className="border-zinc-800 hover:bg-transparent">
                 <TableHead className="text-zinc-400">Source</TableHead>
+                <TableHead className="text-zinc-400">Engine</TableHead>
                 <TableHead className="text-zinc-400">Status</TableHead>
                 <TableHead className="hidden text-zinc-400 md:table-cell">Mulai</TableHead>
                 <TableHead className="hidden text-zinc-400 md:table-cell">Durasi</TableHead>
@@ -95,14 +98,14 @@ export function RunsView({ live }: { live: boolean }) {
               {!data ? (
                 Array.from({ length: 8 }).map((_, i) => (
                   <TableRow key={i} className="border-zinc-800/60">
-                    {Array.from({ length: 11 }).map((__, j) => (
+                    {Array.from({ length: 12 }).map((__, j) => (
                       <TableCell key={j}><div className="h-4 w-full animate-pulse rounded bg-zinc-800" /></TableCell>
                     ))}
                   </TableRow>
                 ))
               ) : data.runs.length === 0 ? (
                 <TableRow className="border-zinc-800/60 hover:bg-transparent">
-                  <TableCell colSpan={11}><EmptyState title="Belum ada scrape run" /></TableCell>
+                  <TableCell colSpan={12}><EmptyState title="Belum ada scrape run" /></TableCell>
                 </TableRow>
               ) : (
                 data.runs.map((r) => (
@@ -110,6 +113,16 @@ export function RunsView({ live }: { live: boolean }) {
                     <TableCell>
                       <p className="font-medium text-zinc-100">{r.source.name}</p>
                       <p className="text-[11px] text-zinc-500">{r.source.scraperType}</p>
+                    </TableCell>
+                    <TableCell>
+                      {r.engine && ENGINES[r.engine as EngineKey] ? (
+                        <span className={`inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${ENGINES[r.engine as EngineKey].badge}`}>
+                          <span className={`h-1.5 w-1.5 rounded-full ${ENGINES[r.engine as EngineKey].dot}`} />
+                          {ENGINES[r.engine as EngineKey].name}
+                        </span>
+                      ) : (
+                        <span className="text-[11px] text-zinc-600">—</span>
+                      )}
                     </TableCell>
                     <TableCell><StatusBadge status={r.status} /></TableCell>
                     <TableCell className="hidden text-sm text-zinc-400 md:table-cell">{timeAgo(r.startedAt)}</TableCell>

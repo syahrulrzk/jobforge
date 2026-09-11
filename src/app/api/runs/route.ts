@@ -35,6 +35,7 @@ export async function GET(req: NextRequest) {
     runs: runs.map((r) => ({
       id: r.id,
       source: r.source,
+      engine: r.engine,
       startedAt: r.startedAt,
       finishedAt: r.finishedAt,
       durationMs: r.finishedAt ? r.finishedAt.getTime() - r.startedAt.getTime() : null,

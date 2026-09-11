@@ -10,9 +10,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { MoreHorizontal, Pencil, Play, Plus, Power, Trash2 } from "lucide-react";
+import { Cpu, MoreHorizontal, Pencil, Play, Plus, Power, Trash2 } from "lucide-react";
 import { EmptyState, StatusBadge, timeAgo } from "./ui-bits";
 import { useApi } from "@/hooks/use-api";
+import { ENGINES, ENGINE_KEYS, type EngineKey } from "@/lib/jobforge/engines";
 
 interface SourceRow {
   id: string;
@@ -22,11 +23,12 @@ interface SourceRow {
   type: string;
   status: string;
   scraperType: string;
+  engine: string;
   schedule: string;
   lastRunAt: string | null;
   jobCount: number;
   runCount: number;
-  lastRun: { status: string; jobsFound: number; jobsCreated: number; jobsRejected: number; startedAt: string } | null;
+  lastRun: { status: string; jobsFound: number; jobsCreated: number; jobsRejected: number; engine: string | null; startedAt: string } | null;
 }
 
 interface SourcesResponse {
@@ -41,14 +43,55 @@ const SCHEDULE_LABELS: Record<string, string> = {
   manual: "Manual",
 };
 
-const EMPTY_FORM = { name: "", baseUrl: "", type: "JOB_PORTAL", scraperType: "STATIC", schedule: "every_6_hours" };
+const EMPTY_FORM = { name: "", baseUrl: "", type: "JOB_PORTAL", scraperType: "STATIC", schedule: "every_6_hours", engine: "cheerio" };
+
+function EngineBadge({ engine, className = "" }: { engine: string | null | undefined; className?: string }) {
+  const meta = engine ? ENGINES[engine as EngineKey] : null;
+  if (!meta) return <span className="text-[11px] text-zinc-600">—</span>;
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-md border px-1.5 py-0.5 text-[10px] font-semibold ${meta.badge} ${className}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />
+      {meta.name}
+    </span>
+  );
+}
 
 export function SourcesView({ live }: { live: boolean }) {
   const { data, reload } = useApi<SourcesResponse>("/api/sources", { intervalMs: live ? 6000 : null });
+  const { data: settingsData, reload: reloadSettings } = useApi<{ settings: { enginePool: string } }>("/api/settings");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<SourceRow | null>(null);
   const [form, setForm] = useState(EMPTY_FORM);
+  const [poolBusy, setPoolBusy] = useState(false);
+
+  const activePool = useMemo(() => {
+    const raw = settingsData?.settings.enginePool ?? "cheerio,crawlee,puppeteer,selenium";
+    return raw.split(",").map((k) => k.trim()) as EngineKey[];
+  }, [settingsData]);
+
+  const toggleEngine = async (key: EngineKey) => {
+    setPoolBusy(true);
+    try {
+      const next = activePool.includes(key) ? activePool.filter((k) => k !== key) : [...activePool, key];
+      if (next.length === 0) {
+        toast.error("Minimal satu engine harus aktif");
+        return;
+      }
+      const res = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enginePool: next.join(",") }),
+      });
+      if (!res.ok) throw new Error();
+      toast.success(`${ENGINES[key].name} ${next.includes(key) ? "diaktifkan" : "dinonaktifkan"} — run berikutnya memakai pool baru`);
+      void reloadSettings();
+    } catch {
+      toast.error("Gagal mengubah engine pool");
+    } finally {
+      setPoolBusy(false);
+    }
+  };
 
   const openAdd = () => {
     setEditing(null);
@@ -57,7 +100,7 @@ export function SourcesView({ live }: { live: boolean }) {
   };
   const openEdit = (s: SourceRow) => {
     setEditing(s);
-    setForm({ name: s.name, baseUrl: s.baseUrl, type: s.type, scraperType: s.scraperType, schedule: s.schedule });
+    setForm({ name: s.name, baseUrl: s.baseUrl, type: s.type, scraperType: s.scraperType, schedule: s.schedule, engine: s.engine || "cheerio" });
     setDialogOpen(true);
   };
 
@@ -134,12 +177,60 @@ export function SourcesView({ live }: { live: boolean }) {
         </Button>
       </div>
 
+      {/* §9.2 Engine Pool — pilih 1, 2, atau semua engine */}
+      <section className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Cpu className="h-4 w-4 text-amber-400" />
+            <h3 className="text-sm font-semibold text-zinc-200">Engine Pool</h3>
+            <span className="rounded-md border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-zinc-300">
+              {activePool.length}/{ENGINE_KEYS.length} aktif
+            </span>
+          </div>
+          <p className="hidden text-[11px] text-zinc-600 sm:block">
+            Run dirotasi ke engine aktif — source dengan engine di luar pool otomatis failover
+          </p>
+        </div>
+        <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+          {ENGINE_KEYS.map((key) => {
+            const meta = ENGINES[key];
+            const active = activePool.includes(key);
+            return (
+              <div
+                key={key}
+                className={`rounded-lg border px-3 py-2.5 transition-colors ${active ? "border-zinc-700 bg-zinc-900/80" : "border-zinc-800/60 bg-zinc-900/30 opacity-60"}`}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${meta.dot} ${active ? "animate-pulse" : "opacity-40"}`} />
+                      <p className="truncate text-[13px] font-semibold text-zinc-100">{meta.name}</p>
+                      <span className="rounded bg-zinc-800 px-1 text-[9px] font-medium uppercase tracking-wide text-zinc-400">{meta.kind}</span>
+                    </div>
+                    <p className="mt-0.5 truncate text-[10px] text-zinc-500">{meta.tech}</p>
+                    <p className="mt-1 line-clamp-2 text-[10px] leading-snug text-zinc-600">{meta.description}</p>
+                    <p className="mt-1 font-mono text-[9px] tabular-nums text-zinc-600">~{meta.memoryMb} MB · {meta.latencyMs[0]}–{meta.latencyMs[1]} ms</p>
+                  </div>
+                  <Switch
+                    checked={active}
+                    disabled={poolBusy}
+                    onCheckedChange={() => void toggleEngine(key)}
+                    className="data-[state=checked]:bg-amber-500"
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
       <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/60">
         <div className="max-h-[64vh] overflow-y-auto">
           <Table>
             <TableHeader className="sticky top-0 z-10 bg-zinc-900">
               <TableRow className="border-zinc-800 hover:bg-transparent">
                 <TableHead className="text-zinc-400">Source</TableHead>
+                <TableHead className="text-zinc-400">Engine</TableHead>
                 <TableHead className="text-zinc-400">Status</TableHead>
                 <TableHead className="hidden text-zinc-400 md:table-cell">Schedule</TableHead>
                 <TableHead className="hidden text-zinc-400 md:table-cell">Last Run</TableHead>
@@ -160,7 +251,7 @@ export function SourcesView({ live }: { live: boolean }) {
                 ))
               ) : sorted.length === 0 ? (
                 <TableRow className="border-zinc-800/60 hover:bg-transparent">
-                  <TableCell colSpan={8}><EmptyState title="Belum ada source" hint="Tambahkan source pertama Anda" /></TableCell>
+                  <TableCell colSpan={9}><EmptyState title="Belum ada source" hint="Tambahkan source pertama Anda" /></TableCell>
                 </TableRow>
               ) : (
                 sorted.map((s) => (
@@ -169,12 +260,16 @@ export function SourcesView({ live }: { live: boolean }) {
                       <p className="font-medium text-zinc-100">{s.name}</p>
                       <p className="text-[11px] text-zinc-500">{s.baseUrl.replace(/^https?:\/\//, "")} · {s.scraperType}</p>
                     </TableCell>
+                    <TableCell><EngineBadge engine={s.engine} /></TableCell>
                     <TableCell><StatusBadge status={s.status} /></TableCell>
                     <TableCell className="hidden text-sm text-zinc-400 md:table-cell">{SCHEDULE_LABELS[s.schedule] ?? s.schedule}</TableCell>
                     <TableCell className="hidden md:table-cell">
                       {s.lastRun ? (
                         <div>
-                          <StatusBadge status={s.lastRun.status} />
+                          <div className="flex items-center gap-1.5">
+                            <StatusBadge status={s.lastRun.status} />
+                            {s.lastRun.engine && <EngineBadge engine={s.lastRun.engine} />}
+                          </div>
                           <p className="mt-0.5 text-[11px] text-zinc-500">{timeAgo(s.lastRun.startedAt)} · {s.lastRun.jobsFound} found</p>
                         </div>
                       ) : (
@@ -255,12 +350,24 @@ export function SourcesView({ live }: { live: boolean }) {
                 <Select value={form.scraperType} onValueChange={(v) => setForm({ ...form, scraperType: v })}>
                   <SelectTrigger className="border-zinc-800 bg-zinc-900"><SelectValue /></SelectTrigger>
                   <SelectContent className="border-zinc-800 bg-zinc-900">
-                    <SelectItem value="STATIC">STATIC (Cheerio)</SelectItem>
-                    <SelectItem value="DYNAMIC">DYNAMIC (Playwright)</SelectItem>
+                    <SelectItem value="STATIC">STATIC (HTTP + DOM)</SelectItem>
+                    <SelectItem value="DYNAMIC">DYNAMIC (SPA render)</SelectItem>
                     <SelectItem value="API">API</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-zinc-400">Scraper Engine</Label>
+              <Select value={form.engine} onValueChange={(v) => setForm({ ...form, engine: v })}>
+                <SelectTrigger className="border-zinc-800 bg-zinc-900"><SelectValue /></SelectTrigger>
+                <SelectContent className="border-zinc-800 bg-zinc-900">
+                  {ENGINE_KEYS.map((k) => (
+                    <SelectItem key={k} value={k}>{ENGINES[k].name} — {ENGINES[k].tech}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-[11px] text-zinc-600">Engine dipakai bila aktif di Engine Pool, jika tidak run otomatis failover ke engine lain.</p>
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs text-zinc-400">Schedule</Label>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -88,6 +89,22 @@ export function JobsView({ live }: { live: boolean }) {
   const { data: sourcesData } = useApi<SourcesResponse>("/api/sources");
   const { data: detailData } = useApi<JobDetail>(selectedId ? `/api/jobs/${selectedId}` : null);
   const detail = detailData?.job;
+
+  const forceReady = async () => {
+    if (!selectedId) return;
+    try {
+      const res = await fetch(`/api/jobs/${selectedId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "force_ready" }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Override gagal");
+      toast.success("Job dipaksa READY — delivery worker akan mengirim ke portal");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Override gagal");
+    }
+  };
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
 
@@ -253,6 +270,15 @@ export function JobsView({ live }: { live: boolean }) {
                   <p className="mt-3 rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-3 py-2 text-xs text-yellow-300/90">
                     {detail.statusReason}
                   </p>
+                )}
+                {["NEEDS_ENRICHMENT", "VALIDATING", "ENRICHING", "PROCESSING"].includes(detail.status) && (
+                  <Button
+                    size="sm"
+                    className="mt-3 h-7 w-full bg-amber-500 text-[11px] text-zinc-950 hover:bg-amber-400"
+                    onClick={() => void forceReady()}
+                  >
+                    Override → READY (kirim manual ke portal)
+                  </Button>
                 )}
               </SheetHeader>
 

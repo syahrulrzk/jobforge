@@ -27,6 +27,7 @@ export async function GET() {
       type: s.type,
       status: s.status,
       scraperType: s.scraperType,
+      engine: s.engine,
       schedule: s.schedule,
       lastRunAt: s.lastRunAt,
       jobCount: s._count.jobLinks,
@@ -37,6 +38,7 @@ export async function GET() {
             jobsFound: lastRun.jobsFound,
             jobsCreated: lastRun.jobsCreated,
             jobsRejected: lastRun.jobsRejected,
+            engine: lastRun.engine,
             startedAt: lastRun.startedAt,
           }
         : null,
@@ -67,6 +69,7 @@ export async function POST(req: NextRequest) {
       type: d.type,
       status: "ACTIVE",
       scraperType: d.scraperType,
+      engine: d.engine ?? "cheerio",
       schedule: d.schedule,
     },
   });
