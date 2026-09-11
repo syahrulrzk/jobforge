@@ -55,3 +55,15 @@ Work Log:
 Stage Summary:
 - Logos flow end-to-end: scrape → enrich (provider chain) → DB logoUrl (PNG link) → UI render → Job Portal payload
 - Verified: /api/logo/tokopedia.com returns real PNG 4.4KB (google-s2 provider), fictional domain honest 404 + initials fallback, tsc clean, page HTTP 200
+---
+Task ID: 5
+Agent: Super Z (main)
+Task: Show company logos on dashboard (user request)
+
+Work Log:
+- /api/dashboard: added topCompanies query (top 8 by job count, includes logoUrl/website/industry/jobCount)
+- overview.tsx: new "Top Companies" leaderboard card between charts row and Sources Health row — rank number, CompanyAvatar with logo fallback chain, name, industry, job count, relative amber progress bar; click-through to Companies view
+- Verified: tsc clean, API returns 8 ranked companies with clearbit logos, page HTTP 200
+
+Stage Summary:
+- Dashboard now displays company logos via Top Companies leaderboard (logo fallback: stored URL → /api/logo proxy → initials)

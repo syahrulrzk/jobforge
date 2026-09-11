@@ -12,7 +12,7 @@ import {
   YAxis,
 } from "recharts";
 import { Activity, AlertTriangle, ArrowRight, Building2, CheckCircle2, FileText, Mail, Rocket, Send, XCircle } from "lucide-react";
-import { StatCard, StatusBadge, LogActionColor, timeAgo, EmptyState } from "./ui-bits";
+import { StatCard, StatusBadge, LogActionColor, timeAgo, EmptyState, CompanyAvatar } from "./ui-bits";
 import { useApi } from "@/hooks/use-api";
 import { useJobForgeStore } from "@/store/jobforge";
 import { cn } from "@/lib/utils";
@@ -49,6 +49,7 @@ interface DashboardData {
     lastRunAt: string | null;
     successRate: number | null;
   }[];
+  topCompanies: { id: string; name: string; logoUrl: string; website: string | null; industry: string | null; jobCount: number }[];
   recentActivity: { id: string; ts: string; source: string | null; action: string; status: string; message: string; durationMs: number | null }[];
 }
 
@@ -66,7 +67,7 @@ export function OverviewView({ live }: { live: boolean }) {
 
   if (!data) return <OverviewSkeleton />;
 
-  const { stats, inFlight, activity, sourceHealth, recentActivity, statusDist } = data;
+  const { stats, inFlight, activity, sourceHealth, topCompanies, recentActivity, statusDist } = data;
   const chartData = activity.map((a) => ({
     ...a,
     label: new Date(a.date + "T00:00:00").toLocaleDateString("id-ID", { day: "numeric", month: "short" }),
@@ -166,6 +167,49 @@ export function OverviewView({ live }: { live: boolean }) {
               </BarChart>
             </ResponsiveContainer>
           </div>
+        </div>
+      </div>
+
+      {/* Top companies leaderboard — logos (§11, §28) */}
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-zinc-200">Top Companies</h3>
+          <button
+            onClick={() => setView("companies")}
+            className="flex items-center gap-1 text-[11px] font-medium text-amber-400 transition-colors hover:text-amber-300"
+            title="Buka halaman Companies"
+          >
+            {stats.totalCompanies.toLocaleString("id-ID")} perusahaan
+            <ArrowRight className="h-3 w-3" />
+          </button>
+        </div>
+        <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
+          {topCompanies.map((c, i) => {
+            const max = topCompanies[0]?.jobCount || 1;
+            return (
+              <div
+                key={c.id}
+                onClick={() => setView("companies")}
+                className="cursor-pointer rounded-lg border border-transparent p-2 transition-colors hover:border-zinc-700/70 hover:bg-zinc-800/40"
+              >
+                <div className="flex items-center gap-2.5">
+                  <span className="w-4 shrink-0 text-center font-mono text-[10px] text-zinc-600">{i + 1}</span>
+                  <CompanyAvatar name={c.name} logoUrl={c.logoUrl} website={c.website} size={36} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[13px] font-medium text-zinc-200">{c.name}</p>
+                    <p className="truncate text-[11px] text-zinc-500">{c.industry ?? "Industri belum diketahui"}</p>
+                  </div>
+                  <span className="shrink-0 text-sm font-bold tabular-nums text-zinc-300">{c.jobCount}</span>
+                </div>
+                <div className="mt-2 h-1 overflow-hidden rounded-full bg-zinc-800">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-amber-500 to-amber-400 transition-all"
+                    style={{ width: `${Math.max(6, Math.round((c.jobCount / max) * 100))}%` }}
+                  />
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 

@@ -104,6 +104,21 @@ export async function GET() {
     })
     .sort((a, b) => b.jobCount - a.jobCount);
 
+  // top companies leaderboard — logo + job count (§28, §11)
+  const topCompaniesRaw = await db.company.findMany({
+    orderBy: { jobs: { _count: "desc" } },
+    take: 8,
+    include: { _count: { select: { jobs: true } } },
+  });
+  const topCompanies = topCompaniesRaw.map((c) => ({
+    id: c.id,
+    name: c.name,
+    logoUrl: c.logoUrl,
+    website: c.website,
+    industry: c.industry,
+    jobCount: c._count.jobs,
+  }));
+
   // recent activity (§26 structured logs) — preview for dashboard console
   const recentActivity = await db.activityLog.findMany({
     orderBy: { ts: "desc" },
@@ -142,6 +157,7 @@ export async function GET() {
     activity,
     statusDist,
     sourceHealth,
+    topCompanies,
     recentActivity,
   });
 }
