@@ -3,8 +3,10 @@
 // Cari LokerBase (PRD §29 search) — dua mode pencarian:
 //
 //   1. Cari Database  — instan, filter job yang sudah ada di DB
-//   2. Scrape Live    — engine pool jalan scraping on-demand ke semua real
-//                       board untuk kata kunci posisi, hasil masuk DB
+//   2. Scrape Live    — pilih board dari Data Sources, engine jalan
+//                       scraping on-demand untuk kata kunci posisi;
+//                       engine tiap board ngikutin setting source
+//                       (§9.3 multi-engine), hasil masuk DB
 //                       (fingerprint dedup) lalu ditampilkan dari DB
 //
 // Aturan email wajib: hanya lowongan yang punya email HR yang masuk DB
@@ -18,7 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { BriefcaseBusiness, ChevronLeft, ChevronRight, Database, Globe, Loader2, MapPin, Search, Zap } from "lucide-react";
+import { BriefcaseBusiness, ChevronLeft, ChevronRight, Database, Globe, Layers, Loader2, MapPin, Search, Zap } from "lucide-react";
 import { CompanyAvatar, EmptyState, StatusBadge, formatIDR, timeAgo } from "./ui-bits";
 import { JobDetailSheet } from "./job-detail-sheet";
 import { ENGINES, type EngineKey } from "@/lib/jobforge/engines";
@@ -68,6 +70,32 @@ interface LiveSearchResponse {
   totalSkipped: number;
 }
 
+// Source dari Data Sources — dipakai sebagai picker board di mode live
+interface SourceRow {
+  slug: string;
+  name: string;
+  status: string;
+  engine: string;
+  engines: string;
+}
+
+const STATUS_DOT: Record<string, string> = {
+  ACTIVE: "bg-emerald-400",
+  ERROR: "bg-rose-400",
+  INACTIVE: "bg-zinc-600",
+};
+
+function primaryEngine(s: SourceRow): string {
+  return (s.engines || s.engine || "cheerio").split(",")[0].trim();
+}
+
+function engineChainLabel(s: SourceRow): string {
+  return (s.engines || s.engine || "cheerio")
+    .split(",")
+    .map((e) => ENGINES[e.trim() as EngineKey]?.name ?? e.trim())
+    .join(" → ");
+}
+
 const POPULAR_POSITIONS = [
   "Frontend Developer",
   "Backend Developer",
@@ -98,6 +126,40 @@ export function SearchView() {
 
   const [liveRunning, setLiveRunning] = useState(false);
   const [liveResult, setLiveResult] = useState<LiveSearchResponse | null>(null);
+
+  // Board picker — daftar source dari Data Sources (DB), bukan hardcode.
+  // Default terpilih: semua source ACTIVE.
+  const [sources, setSources] = useState<SourceRow[]>([]);
+  const [selectedBoards, setSelectedBoards] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await fetch("/api/sources", { cache: "no-store" });
+        if (!res.ok) return;
+        const json = (await res.json()) as { sources?: SourceRow[] };
+        const rows = json.sources ?? [];
+        setSources(rows);
+        setSelectedBoards(new Set(rows.filter((s) => s.status === "ACTIVE").map((s) => s.slug)));
+      } catch {
+        // picker tetap kosong — mode live pakai default semua ACTIVE
+      }
+    })();
+  }, []);
+
+  const toggleBoard = (slug: string) => {
+    setSelectedBoards((prev) => {
+      const next = new Set(prev);
+      if (next.has(slug)) next.delete(slug);
+      else next.add(slug);
+      return next;
+    });
+  };
+
+  const selectedNames = useMemo(
+    () => sources.filter((s) => selectedBoards.has(s.slug)).map((s) => s.name),
+    [sources, selectedBoards]
+  );
 
   const applyNow = (q = input, loc = locInput, rem = remote) => {
     setApplied({ q: q.trim(), loc: loc.trim(), remote: rem });
@@ -130,14 +192,18 @@ export function SearchView() {
       toast.error("Ketik posisi yang mau dicari (min. 2 karakter)");
       return;
     }
+    if (sources.length > 0 && selectedBoards.size === 0) {
+      toast.error("Pilih minimal 1 board sumber dulu");
+      return;
+    }
     setLiveRunning(true);
     setLiveResult(null);
-    toast.info(`Engine menjalankan scrape live ke 5 board untuk “${keyword}”…`);
+    toast.info(`Engine menjalankan scrape live ke ${selectedBoards.size} board untuk “${keyword}”…`);
     try {
       const res = await fetch("/api/search/live", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q: keyword }),
+        body: JSON.stringify({ q: keyword, sources: [...selectedBoards] }),
       });
       const json = (await res.json()) as LiveSearchResponse & { error?: string };
       if (!res.ok) throw new Error(json.error ?? "Live scrape gagal");
@@ -180,7 +246,7 @@ export function SearchView() {
               <p className="text-xs text-zinc-500">
                 {mode === "db"
                   ? "Filter instan dari database job hasil scraping pipeline"
-                  : "Engine jalan scraping live ke semua board untuk posisi yang kamu mau"}
+                  : "Pilih board dari Data Sources — engine scrape ngikutin setting engine di tiap source"}
               </p>
             </div>
           </div>
@@ -246,6 +312,54 @@ export function SearchView() {
           )}
         </div>
 
+        {/* Board picker (live mode) — sumber = Data Sources yang sudah ditambahkan */}
+        {mode === "live" && (
+          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 flex items-center gap-1 text-[11px] text-zinc-500">
+              <Layers className="h-3.5 w-3.5" /> Board sumber:
+            </span>
+            {sources.map((s) => {
+              const on = selectedBoards.has(s.slug);
+              const pe = ENGINES[primaryEngine(s) as EngineKey];
+              return (
+                <button
+                  key={s.slug}
+                  type="button"
+                  disabled={liveRunning}
+                  onClick={() => toggleBoard(s.slug)}
+                  title={`${s.name} · ${s.status} · engine: ${engineChainLabel(s)}`}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors disabled:opacity-50 ${
+                    on
+                      ? "border-teal-500/50 bg-teal-500/15 text-teal-200"
+                      : "border-zinc-800 bg-zinc-900 text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+                  }`}
+                >
+                  <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[s.status] ?? "bg-zinc-600"}`} />
+                  {s.name}
+                  <span className={`rounded px-1 text-[9px] font-semibold ${on && pe ? pe.badge : "bg-zinc-800 text-zinc-500"}`}>
+                    {pe?.name ?? primaryEngine(s)}
+                  </span>
+                </button>
+              );
+            })}
+            {sources.length === 0 && (
+              <span className="text-[11px] text-zinc-600">
+                Belum ada source — tambahkan dulu di menu Data Sources
+              </span>
+            )}
+            {sources.length > 0 && selectedBoards.size < sources.length && (
+              <button
+                type="button"
+                disabled={liveRunning}
+                onClick={() => setSelectedBoards(new Set(sources.filter((s) => s.status === "ACTIVE").map((s) => s.slug)))}
+                className="rounded-full border border-dashed border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-500 transition-colors hover:border-zinc-600 hover:text-zinc-300 disabled:opacity-50"
+              >
+                Reset ke semua aktif
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
           <span className="mr-1 text-[11px] text-zinc-600">{mode === "db" ? "Populer:" : "Coba scrape:"}</span>
           {POPULAR_POSITIONS.map((p) => (
@@ -273,7 +387,7 @@ export function SearchView() {
         {mode === "live" && liveRunning && (
           <p className="mt-3 flex items-center gap-2 rounded-lg border border-teal-500/20 bg-teal-500/5 px-3 py-2 text-xs text-teal-300">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Engine pool menjalankan scrape live ke Remotive, Jobicy, Arbeitnow, RemoteOK & Himalayas — hanya lowongan dengan email HR yang disimpan…
+            Engine menjalankan scrape live ke {selectedNames.length > 0 ? selectedNames.join(", ") : "board aktif"} — engine ngikutin setting tiap source · hanya lowongan dengan email HR yang disimpan…
           </p>
         )}
 
@@ -385,7 +499,7 @@ export function SearchView() {
           title="Tidak ada lowongan yang cocok"
           hint={
             mode === "live"
-              ? "Coba kata kunci lain atau scrape ulang — engine butuh board yang punya posisi tersebut"
+              ? "Coba kata kunci lain, scrape ulang, atau pilih board lain di picker Board sumber — engine butuh board yang punya posisi tersebut"
               : "Coba kata kunci lain, kurangi filter, atau pakai mode Scrape Live untuk mencari dari board langsung"
           }
         />

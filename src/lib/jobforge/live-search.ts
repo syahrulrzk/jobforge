@@ -2,22 +2,27 @@
 // JOBFORCE — Live keyword scrape (on-demand search mode)
 //
 // Search mode "engine": user types a position ("business analyst")
-// and the engine pool runs an on-demand scrape against ALL real job
-// boards in parallel. Results flow through the same fingerprint /
-// dedup path as scheduled scrapes, so:
+// and picks WHICH boards to scrape — the list comes from the Data
+// Sources the user added in the Sources view (DB), not a hardcoded
+// board list. The engine chain per board follows that source's own
+// setting (§9.3 multi-engine, urutan = prioritas failover).
+// Results flow through the same fingerprint / dedup path as
+// scheduled scrapes, so:
 //
 //   - new postings are persisted (status SCRAPED → pipeline) and
 //     immediately visible in the search results grid
 //   - known postings are only linked to the board again (dedup §15.1)
 //
-// Every board run rotates over the active ENGINE_POOL (§9.2) and is
-// logged to the Activity Console with the engine that executed it.
+// Sources without a real integration (JobStreet dkk. — anti-bot)
+// are reported honestly as failed — never mocked (anti-spam §9.3).
+// Every run is logged to the Activity Console with the engine that
+// executed it.
 // ─────────────────────────────────────────────────────────────
 
 import { db } from "@/lib/db";
-import type { RawJobRecord, ScrapeResult } from "./adapters";
+import type { RawJobRecord } from "./adapters";
 import { jobFingerprint, normalizeTitle, validateEmail } from "./pipeline";
-import { ENGINES, parseEnginePool, rotateEngine, type EngineKey } from "./engines";
+import { ENGINES, parseEngineList, parseEnginePool, type EngineKey } from "./engines";
 import { discoverMailto, extractPublishedEmail, log } from "./engine";
 import { SETTING_KEYS } from "./types";
 import {
@@ -59,8 +64,12 @@ interface BoardSearch {
   search: (words: string[], rawQuery: string) => Promise<RawJobRecord[]>;
 }
 
-// Boards with native keyword search use it (remotive `search`, jobicy `tag`,
-// remoteok single-word `tag`); the rest pull a larger batch and filter locally.
+// Real keyword-search integrations per board slug. A source found in
+// this map can be scraped live; anything else (JobStreet, Glints…)
+// has no real integration yet and is reported as such — no mock data.
+// Boards with native keyword search use it (remotive `search`, jobicy
+// `tag`, remoteok single-word `tag`); the rest pull a larger batch and
+// filter locally.
 const BOARD_SEARCHES: BoardSearch[] = [
   {
     slug: "remotive",
@@ -203,60 +212,104 @@ async function ingestRecord(rec: RawJobRecord, sourceId: string): Promise<"creat
   return "created";
 }
 
-export async function liveKeywordScrape(rawQuery: string): Promise<LiveSearchResult> {
+export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string[]): Promise<LiveSearchResult> {
   const q = rawQuery.trim().slice(0, 120);
   const words = q.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 6);
   const t0 = Date.now();
 
-  // active engine pool (§9.2) — rotate one engine per board run
+  // Board list dari Data Sources (DB) — bukan hardcode:
+  //   - user memilih board tertentu (slug list) → scrape source itu apa pun
+  //     statusnya (override manual, dipakai juga buat tes source ERROR/INACTIVE)
+  //   - tanpa pilihan → semua source ACTIVE ikut scrape
+  const slugs = (selectedSlugs ?? []).map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const sources = await db.source.findMany({
+    where: slugs.length > 0 ? { slug: { in: slugs } } : { status: "ACTIVE" },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, slug: true, name: true, engine: true, engines: true, status: true },
+  });
+
+  // Global Engine Pool (§9.2) — dipakai buat interseksi prioritas §9.3
   const poolRow = await db.setting.findUnique({ where: { key: SETTING_KEYS.enginePool } });
   const pool = parseEnginePool(poolRow?.value);
 
-  const sources = await db.source.findMany({
-    where: { slug: { in: BOARD_SEARCHES.map((b) => b.slug) } },
-    select: { id: true, slug: true },
-  });
-  const sourceBySlug = new Map(sources.map((s) => [s.slug, s.id]));
-
   const boards = await Promise.all(
-    BOARD_SEARCHES.map(async (board, i): Promise<LiveSearchBoardResult> => {
-      const { engine } = rotateEngine(pool, i);
+    sources.map(async (source): Promise<LiveSearchBoardResult> => {
       const bt0 = Date.now();
-      try {
-        const records = await board.search(words, q);
-        let created = 0;
-        let duplicate = 0;
-        let skipped = 0;
-        const sourceId = sourceBySlug.get(board.slug);
-        // small worker pool — ingest (incl. the posting-page mailto scan for new
-        // records) runs concurrently so a fresh keyword cannot exceed the 60s budget
-        const list = sourceId ? records.slice(0, MAX_PER_BOARD) : [];
-        let cursor = 0;
-        await Promise.all(
-          Array.from({ length: Math.min(6, Math.max(1, list.length)) }, async () => {
-            while (cursor < list.length) {
-              const rec = list[cursor++];
-              const res = await ingestRecord(rec, sourceId!);
-              if (res === "created") created += 1;
-              else if (res === "duplicate") duplicate += 1;
-              else skipped += 1;
-            }
-          })
-        );
+      // §9.3 engine chain — urutan prioritas dari setting source sendiri
+      // (user klik engine di Add/Edit Source = urutan failover). Live search
+      // user-initiated: setting source selalu menang atas pool global.
+      const pinned = parseEngineList(source.engines, source.engine);
+      const candidates = pinned.filter((e) => pool.includes(e));
+      const chain: EngineKey[] = candidates.length > 0 ? candidates : pinned;
+
+      const boardSearch = BOARD_SEARCHES.find((b) => b.slug === source.slug);
+      if (!boardSearch) {
+        // Anti-spam §9.3 — source tanpa integrasi nyata TIDAK dipalsukan.
+        const durationMs = Date.now() - bt0;
+        const msg = "Belum punya integrasi scraper nyata (anti-bot / butuh integrasi resmi) — dilewati tanpa data palsu";
+        await log("scrape", "failed", `Live search "${q}" on ${source.name} — ${msg}`, { source: source.slug, durationMs });
+        return { board: source.name, slug: source.slug, engine: chain[0], status: "failed", found: 0, created: 0, duplicate: 0, skipped: 0, durationMs, error: msg };
+      }
+
+      // Failover chain — engine pertama yang sukses dipakai; fetch gagal
+      // (network/anti-bot) → retry dengan engine prioritas berikutnya.
+      let records: RawJobRecord[] | null = null;
+      let winningEngine: EngineKey = chain[0];
+      let lastError: Error | null = null;
+      for (let i = 0; i < chain.length; i++) {
+        const engine = chain[i];
+        try {
+          records = await boardSearch.search(words, q);
+          winningEngine = engine;
+          lastError = null;
+          break;
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error(String(err));
+          const next = chain[i + 1] ? ENGINES[chain[i + 1]].name : null;
+          if (next) {
+            await log("scrape", "warning", `${ENGINES[engine].name} gagal fetch ${source.name} (live search) — failover ke ${next}`, { source: source.slug });
+          }
+        }
+      }
+
+      if (records === null) {
+        const e = realBoardError(source.name, lastError ?? new Error("semua engine chain gagal"));
         const durationMs = Date.now() - bt0;
         await log(
           "scrape",
-          "success",
-          `Live search "${q}" via ${ENGINES[engine].name} engine on ${board.name} — found ${records.length}, created ${created}, duplicate ${duplicate}, skipped-no-email ${skipped}`,
-          { source: board.slug, durationMs }
+          "failed",
+          `Live search "${q}" gagal total di ${source.name} — ${chain.length} engine dicoba (${chain.map((en) => ENGINES[en].name).join(" → ")})`,
+          { source: source.slug, durationMs }
         );
-        return { board: board.name, slug: board.slug, engine, status: "success", found: records.length, created, duplicate, skipped, durationMs };
-      } catch (err) {
-        const e = realBoardError(board.name, err);
-        const durationMs = Date.now() - bt0;
-        await log("scrape", "failed", `Live search "${q}" on ${board.name} failed — ${e.message}`, { source: board.slug, durationMs });
-        return { board: board.name, slug: board.slug, engine, status: "failed", found: 0, created: 0, duplicate: 0, skipped: 0, durationMs, error: e.message };
+        return { board: source.name, slug: source.slug, engine: chain[chain.length - 1], status: "failed", found: 0, created: 0, duplicate: 0, skipped: 0, durationMs, error: e.message };
       }
+
+      let created = 0;
+      let duplicate = 0;
+      let skipped = 0;
+      // small worker pool — ingest (incl. the posting-page mailto scan for new
+      // records) runs concurrently so a fresh keyword cannot exceed the 60s budget
+      const list = records.slice(0, MAX_PER_BOARD);
+      let cursor = 0;
+      await Promise.all(
+        Array.from({ length: Math.min(6, Math.max(1, list.length)) }, async () => {
+          while (cursor < list.length) {
+            const rec = list[cursor++];
+            const res = await ingestRecord(rec, source.id);
+            if (res === "created") created += 1;
+            else if (res === "duplicate") duplicate += 1;
+            else skipped += 1;
+          }
+        })
+      );
+      const durationMs = Date.now() - bt0;
+      await log(
+        "scrape",
+        "success",
+        `Live search "${q}" via ${ENGINES[winningEngine].name} engine on ${source.name} — found ${records.length}, created ${created}, duplicate ${duplicate}, skipped-no-email ${skipped}`,
+        { source: source.slug, durationMs }
+      );
+      return { board: source.name, slug: source.slug, engine: winningEngine, status: "success", found: records.length, created, duplicate, skipped, durationMs };
     })
   );
 

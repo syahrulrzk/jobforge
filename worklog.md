@@ -229,3 +229,24 @@ Stage Summary:
 - Tipe & Tipe Scraper juga multi-select (CSV), UI chip + nomor prioritas
 - Anti-spam total di real mode: source tanpa integrasi nyata TIDAK PERNAH generate mock lagi; job tanpa email di-purge setelah 1x percobaan discovery (paralel 6 worker); DB fresh seeding = sources+settings saja
 - Catatan jujur buat user: JobStreet (Seek) balas 403 Datadome ke scraper anonim — makanya statusnya ERROR; gunakan real board publik (Remotive/Jobicy/Arbeitnow/RemoteOK/Himalayas) atau integrasi resmi utk portal ID
+
+---
+Task ID: 14
+Agent: Super Z (main)
+Task: Live search pakai board dari Data Sources + engine ngikutin setting source (user: "di menu search ada pilihan cari di job mana, misalnya jobstreet, yg udah ditambahin di data source — engine ya ngikutin data source yg udh kita setting")
+
+Work Log:
+- Masalah: liveKeywordScrape hardcode BOARD_SEARCHES 5 board → user hapus/tambah source di Data Sources tidak ngaruh ke menu search (ini juga bikin user bingung "perasaan source udah gw hapus")
+- live-search.ts refactor: liveKeywordScrape(q, selectedSlugs?) — source diambil dari DB (where slug IN pilihan user, tanpa pilihan → semua status ACTIVE, override manual boleh scrape source ERROR/INACTIVE untuk tes); nama board dari DB bukan hardcode
+- Engine chain §9.3 mirror engine.ts: pinned = parseEngineList(source.engines, source.engine) → interseksi Engine Pool global (kosong → pinned, live search user-initiated: setting source menang) → failover loop: fetch gagal → log warning "X gagal — failover ke Y" → retry engine prioritas berikutnya; engine pertama sukses dilaporkan di result
+- Anti-spam §9.3 konsisten: source tanpa integrasi nyata (JobStreet/Glints/Indeed/Kalibrr/Karir.com) → status failed + pesan jujur "Belum punya integrasi scraper nyata (anti-bot / butuh integrasi resmi)" — TIDAK ada mock, 0 job palsu
+- api/search/live: body terima sources[] (slug list, divalidasi string); tanpa sources → default semua ACTIVE
+- search.tsx: picker "Board sumber" (live mode) — chips dari /api/sources (fetch on mount), tiap chip = status dot (ACTIVE emerald/ERROR rose/INACTIVE zinc) + nama + badge engine primary, tooltip berisi chain lengkap "Cheerio → Crawlee → …"; default terpilih = semua ACTIVE; toggle klik; tombol "Reset ke semua aktif"; guard minimal 1 board; banner berjalan menyebut nama board terpilih dinamis; toast jumlah board dinamis; subtitle live mode dijelaskan; empty-state hint menyebut picker
+- Cleanup: import ScrapeResult & rotateEngine tak terpakai dihapus
+- Recovery: Jobicy yang sempat ERROR di-force run → ACTIVE (SUCCESS, 30 found via Crawlee)
+- Verified E2E (scripts/test-live-search-sources.py): TEST 1 JobStreet only → failed jujur 0 mock ✓; TEST 2 Remotive only → 1 board saja, engine cheerio sesuai setting ✓; TEST 3 campuran JobStreet+Arbeitnow → JobStreet failed jujur + Arbeitnow SUCCESS 73 found via puppeteer ✓; TEST 4 tanpa pilihan → default 4 board ACTIVE (Jobicy sempat ERROR saat test, sudah dipulihkan jadi 5) ✓; Remotive found=0 utk "frontend developer" = perilaku benar keyword filter ALL-words (API Remotive broad-match, diverifikasi langsung); tsc clean; GET / 200
+
+Stage Summary:
+- Menu Cari LokerBase mode Scrape Live sekarang PUNYA PILIHAN BOARD — daftar & engine selalu ngikutin Data Sources yang user tambahkan/setting sendiri, bukan hardcode
+- Pilih JobStreet → engine chain 5 engine dari setting source dipakai, hasilnya laporan jujur (anti-bot), tidak pernah job palsu
+- Sumber dihapus di Data Sources → otomatis hilang dari picker search; source baru ditambah → otomatis muncul
