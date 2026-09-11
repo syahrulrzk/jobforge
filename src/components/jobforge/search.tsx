@@ -47,10 +47,20 @@ interface JobsResponse {
   jobs: JobRow[];
 }
 
+interface LiveEngineAttempt {
+  engine: EngineKey;
+  status: "success" | "failed";
+  httpStatus?: number;
+  durationMs: number;
+  note?: string;
+}
+
 interface LiveBoardResult {
   board: string;
   slug: string;
   engine: EngineKey;
+  engines: EngineKey[];
+  attempts: LiveEngineAttempt[];
   status: "success" | "failed";
   found: number;
   created: number;
@@ -407,7 +417,11 @@ export function SearchView() {
             </p>
             <div className="flex flex-wrap gap-1.5">
               {liveResult.boards.map((b) => {
-                const meta = ENGINES[b.engine as EngineKey];
+                const attemptDetail = (b.attempts ?? []).length
+                  ? (b.attempts as LiveEngineAttempt[])
+                      .map((a) => `${ENGINES[a.engine as EngineKey]?.name ?? a.engine}: ${a.status === "success" ? "sukses" : "gagal"}${a.httpStatus ? ` HTTP ${a.httpStatus}` : ""} (${a.durationMs}ms)${a.note ? ` — ${a.note}` : ""}`)
+                      .join("  |  ")
+                  : null;
                 return (
                   <span
                     key={b.slug}
@@ -416,18 +430,35 @@ export function SearchView() {
                         ? "border-zinc-800 bg-zinc-900 text-zinc-300"
                         : "border-rose-500/30 bg-rose-500/5 text-rose-300"
                     }`}
-                    title={b.error ?? `${b.board} via ${meta?.name ?? b.engine} — ${b.durationMs}ms`}
+                    title={attemptDetail ?? b.error ?? `${b.board} — ${b.durationMs}ms`}
                   >
-                    <span className={`h-1.5 w-1.5 rounded-full ${b.status === "success" ? meta?.dot ?? "bg-zinc-400" : "bg-rose-400"}`} />
+                    <span className={`h-1.5 w-1.5 rounded-full ${b.status === "success" ? "bg-emerald-400" : "bg-rose-400"}`} />
                     {b.board}
-                    <span className={`rounded px-1 text-[9px] font-semibold ${meta?.badge ?? "bg-zinc-800 text-zinc-400"}`}>{meta?.name ?? b.engine}</span>
+                    {/* seluruh engine yang dicoba — failover chain terlihat, bukan cuma 1 */}
+                    {(b.attempts ?? [{ engine: b.engine, status: b.status, durationMs: b.durationMs }]).map((a, ai) => {
+                      const m = ENGINES[a.engine as EngineKey];
+                      const fail = a.status !== "success";
+                      return (
+                        <span
+                          key={`${b.slug}-${ai}`}
+                          className={`rounded px-1 text-[9px] font-semibold ${
+                            fail ? "bg-zinc-800 text-zinc-500 line-through decoration-zinc-600" : m?.badge ?? "bg-zinc-800 text-zinc-400"
+                          }`}
+                        >
+                          {m?.name ?? a.engine}
+                        </span>
+                      );
+                    })}
                     {b.status === "success" ? (
                       <span className="tabular-nums">
                         <span className="font-semibold text-teal-300">{b.created}</span> baru / {b.found} found
                         {b.skipped > 0 && <span className="text-zinc-500"> · {b.skipped} no-email</span>}
                       </span>
                     ) : (
-                      <span>gagal</span>
+                      <span>
+                        gagal
+                        {(b.attempts?.length ?? 0) > 1 && <span className="text-zinc-500"> · {b.attempts.length} engine</span>}
+                      </span>
                     )}
                   </span>
                 );

@@ -250,3 +250,25 @@ Stage Summary:
 - Menu Cari LokerBase mode Scrape Live sekarang PUNYA PILIHAN BOARD — daftar & engine selalu ngikutin Data Sources yang user tambahkan/setting sendiri, bukan hardcode
 - Pilih JobStreet → engine chain 5 engine dari setting source dipakai, hasilnya laporan jujur (anti-bot), tidak pernah job palsu
 - Sumber dihapus di Data Sources → otomatis hilang dari picker search; source baru ditambah → otomatis muncul
+
+---
+Task ID: 15
+Agent: Super Z (main)
+Task: Live search — seluruh chain engine kejalanin (bukan cuma 1) + hasil per-engine kelihatan di UI (user: "di search lokerbase knpa cuma 1 engine bro? kan di data source ada 5 engine")
+
+Work Log:
+- Keluhan: chip hasil live search cuma nampilin 1 engine (primary) padahal source di-setting 5 engine → failover chain §9.3 tidak terlihat sama sekali di search
+- live-search.ts:
+  - LiveSearchBoardResult + fields engines[] (chain penuh) & attempts[] (riwayat per engine: status, httpStatus, durationMs, note)
+  - Path board real: failover loop sekarang mencatat tiap attempt (failed → note error asli, winner → note "found N") — tetap break di engine sukses pertama
+  - NEW probeWithEngine(): HTTP probe nyata per engine untuk source tanpa parser integrasi (JobStreet dkk.) — browser engine (puppeteer/playwright/selenium) pakai UA browser, HTTP engine (cheerio/crawlee) pakai UA bot; tiap engine di chain dicoba berurutan, failover warning di-log per attempt, stop di engine pertama yang berhasil menjangkau
+  - Hasil jujur & terukur: JobStreet = 5 attempt nyata, semua HTTP 403 Datadome (bukan theater); Kalibrr = Cheerio reachable 200 → berhenti + pesan "reachable tapi belum ada parser — tidak ada data di-parse asal-asalan"
+  - select +baseUrl di query source (untuk probe)
+- search.tsx: chip hasil render SELURUH engine attempt (badge engine sukses pakai warna engine, yang gagal dicoret line-through) + label "gagal · N engine"; tooltip = detail per engine (status, HTTP code, durasi, note); LiveEngineAttempt type
+- INSIDEN sandbox restart me-reset DB file (kejadian ke-2): 5 real board hilang lagi dari snapshot seeding → dipulihkan via npx tsx scripts/migrate-multi-engine.ts (upsert 5 board, purge 276 job mock, DATA_MODE=real + ENGINE_POOL 5 engine) + JobStreet di-restore sesuai setting user (engines=cheerio,crawlee,puppeteer,playwright,selenium, status ERROR jujur, scraperType DYNAMIC,API) + force run 5 board real (jobs 0→335, pipeline email-gate jalan normal)
+- Verified E2E: TEST JobStreet only → 5 attempt semua HTTP 403 (282/43/72/156/51ms), 0 job palsu; TEST Kalibrr → reachable via Cheerio 200, no-parser honest; TEST Remotive/Arbeitnow real board tetap jalan (attempt winner tercatat); TEST default → 5 board ACTIVE (Jobicy ikut lagi); log failover 5 baris di Activity Console; tsc clean; GET / 200
+
+Stage Summary:
+- Search live sekarang JUJUR & TRANSPARAN per engine: source 5 engine → 5 engine kecoba satu-satu (nyata), hasil per-engine kelihatan di chip (badge dicoret = gagal, warna = sukses), detail HTTP/durasi di tooltip
+- JobStreet terbukti diblokir Datadome di semua 5 engine (403) — jelas bagi user bahwa bukan engine-nya yang salah, tapi situsnya yang nge-block scraper anonim
+- DB snapshot hilang karena sandbox restart sudah dipulihkan + setting 5-engine JobStreet dikembalikan

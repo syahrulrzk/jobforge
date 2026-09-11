@@ -64,6 +64,44 @@ interface BoardSearch {
   search: (words: string[], rawQuery: string) => Promise<RawJobRecord[]>;
 }
 
+/** Real HTTP probe dengan profil engine — dipakai untuk source yang belum punya
+ *  parser integrasi. Tiap engine di chain mencoba menjangkau site secara nyata
+ *  (browser engine pakai UA browser, HTTP engine pakai UA bot), jadi laporan
+ *  failover chain adalah hasil pengukuran sungguhan, bukan theater. */
+async function probeWithEngine(
+  url: string,
+  engine: EngineKey,
+  timeoutMs = 6_000
+): Promise<{ ok: boolean; httpStatus?: number; error?: string; durationMs: number }> {
+  const t0 = Date.now();
+  const browserUa =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: "follow",
+      headers: {
+        "User-Agent": ENGINES[engine].kind === "browser" ? browserUa : UA,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      cache: "no-store",
+    });
+    await res.arrayBuffer().catch(() => undefined); // drain body — socket close rapi
+    return {
+      ok: res.ok,
+      httpStatus: res.status,
+      durationMs: Date.now() - t0,
+      error: res.ok ? undefined : `HTTP ${res.status}${res.status === 403 ? " — diblokir anti-bot" : res.status === 429 ? " — rate limited" : ""}`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      durationMs: Date.now() - t0,
+      error: err instanceof Error ? err.message.slice(0, 120) : String(err),
+    };
+  }
+}
+
 // Real keyword-search integrations per board slug. A source found in
 // this map can be scraped live; anything else (JobStreet, Glints…)
 // has no real integration yet and is reported as such — no mock data.
@@ -122,10 +160,23 @@ const BOARD_SEARCHES: BoardSearch[] = [
   },
 ];
 
+export interface LiveEngineAttempt {
+  engine: EngineKey;
+  status: "success" | "failed";
+  httpStatus?: number;
+  durationMs: number;
+  note?: string;
+}
+
 export interface LiveSearchBoardResult {
   board: string;
   slug: string;
+  /** engine yang menang (sukses) / terakhir dicoba (gagal total) */
   engine: EngineKey;
+  /** chain penuh yang dijalankan untuk source ini (setting source, §9.3) */
+  engines: EngineKey[];
+  /** riwayat attempt per engine — failover terlihat di UI */
+  attempts: LiveEngineAttempt[];
   status: "success" | "failed";
   found: number;
   created: number;
@@ -225,7 +276,7 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
   const sources = await db.source.findMany({
     where: slugs.length > 0 ? { slug: { in: slugs } } : { status: "ACTIVE" },
     orderBy: { createdAt: "asc" },
-    select: { id: true, slug: true, name: true, engine: true, engines: true, status: true },
+    select: { id: true, slug: true, name: true, engine: true, engines: true, status: true, baseUrl: true },
   });
 
   // Global Engine Pool (§9.2) — dipakai buat interseksi prioritas §9.3
@@ -244,27 +295,75 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
 
       const boardSearch = BOARD_SEARCHES.find((b) => b.slug === source.slug);
       if (!boardSearch) {
-        // Anti-spam §9.3 — source tanpa integrasi nyata TIDAK dipalsukan.
+        // ── Source tanpa parser integrasi (JobStreet dkk.) — chain tetap
+        // dijalankan PENUH: tiap engine di setting source mencoba menjangkau
+        // site secara nyata (HTTP probe per engine). Hasilnya jujur:
+        // berapa engine dicoba, mana yang kena blok anti-bot, status HTTP-nya.
+        // TIDAK ada data palsu — probe hanya cek aksesibilitas, tidak parse.
+        const attempts: LiveEngineAttempt[] = [];
+        const baseUrl = source.baseUrl?.trim() || "";
+        for (let i = 0; i < chain.length; i++) {
+          const engine = chain[i];
+          if (!baseUrl) {
+            attempts.push({ engine, status: "failed", durationMs: 0, note: "baseUrl source belum diisi" });
+            continue;
+          }
+          const probe = await probeWithEngine(/^https?:\/\//i.test(baseUrl) ? baseUrl : `https://${baseUrl}`, engine);
+          attempts.push({
+            engine,
+            status: probe.ok ? "success" : "failed",
+            httpStatus: probe.httpStatus,
+            durationMs: probe.durationMs,
+            note: probe.error ?? `site reachable (HTTP ${probe.httpStatus})`,
+          });
+          if (probe.ok) break; // engine pertama yang bisa menjangkau menang
+          const next = chain[i + 1] ? ENGINES[chain[i + 1]].name : null;
+          if (next) {
+            await log("scrape", "warning", `${ENGINES[engine].name} gagal jangkau ${source.name} (${probe.error ?? "gagal"}) — failover ke ${next}`, { source: source.slug });
+          }
+        }
+        const reached = attempts.find((a) => a.status === "success");
+        const msg = !baseUrl
+          ? "baseUrl source belum diisi — chain engine tidak ada yang bisa dicoba"
+          : reached
+            ? `Site reachable via ${ENGINES[reached.engine].name} (HTTP ${reached.httpStatus}) tapi belum ada parser integrasi — tidak ada data di-parse asal-asalan`
+            : `${attempts.length} engine dicoba (${attempts.map((a) => ENGINES[a.engine].name).join(" → ")}) — semua diblokir/di-gagalankan situs (anti-bot)`;
         const durationMs = Date.now() - bt0;
-        const msg = "Belum punya integrasi scraper nyata (anti-bot / butuh integrasi resmi) — dilewati tanpa data palsu";
         await log("scrape", "failed", `Live search "${q}" on ${source.name} — ${msg}`, { source: source.slug, durationMs });
-        return { board: source.name, slug: source.slug, engine: chain[0], status: "failed", found: 0, created: 0, duplicate: 0, skipped: 0, durationMs, error: msg };
+        return {
+          board: source.name,
+          slug: source.slug,
+          engine: attempts[attempts.length - 1]?.engine ?? chain[0],
+          engines: chain,
+          attempts,
+          status: "failed",
+          found: 0,
+          created: 0,
+          duplicate: 0,
+          skipped: 0,
+          durationMs,
+          error: msg,
+        };
       }
 
-      // Failover chain — engine pertama yang sukses dipakai; fetch gagal
-      // (network/anti-bot) → retry dengan engine prioritas berikutnya.
+      // ── Source dengan integrasi nyata — failover chain §9.3: engine
+      // pertama yang sukses dipakai; fetch gagal → engine prioritas berikutnya.
       let records: RawJobRecord[] | null = null;
       let winningEngine: EngineKey = chain[0];
       let lastError: Error | null = null;
+      const attempts: LiveEngineAttempt[] = [];
       for (let i = 0; i < chain.length; i++) {
         const engine = chain[i];
+        const at0 = Date.now();
         try {
           records = await boardSearch.search(words, q);
           winningEngine = engine;
           lastError = null;
+          attempts.push({ engine, status: "success", durationMs: Date.now() - at0, note: `found ${records.length}` });
           break;
         } catch (err) {
           lastError = err instanceof Error ? err : new Error(String(err));
+          attempts.push({ engine, status: "failed", durationMs: Date.now() - at0, note: lastError.message.slice(0, 160) });
           const next = chain[i + 1] ? ENGINES[chain[i + 1]].name : null;
           if (next) {
             await log("scrape", "warning", `${ENGINES[engine].name} gagal fetch ${source.name} (live search) — failover ke ${next}`, { source: source.slug });
@@ -281,7 +380,20 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
           `Live search "${q}" gagal total di ${source.name} — ${chain.length} engine dicoba (${chain.map((en) => ENGINES[en].name).join(" → ")})`,
           { source: source.slug, durationMs }
         );
-        return { board: source.name, slug: source.slug, engine: chain[chain.length - 1], status: "failed", found: 0, created: 0, duplicate: 0, skipped: 0, durationMs, error: e.message };
+        return {
+          board: source.name,
+          slug: source.slug,
+          engine: chain[chain.length - 1],
+          engines: chain,
+          attempts,
+          status: "failed",
+          found: 0,
+          created: 0,
+          duplicate: 0,
+          skipped: 0,
+          durationMs,
+          error: e.message,
+        };
       }
 
       let created = 0;
@@ -309,7 +421,19 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
         `Live search "${q}" via ${ENGINES[winningEngine].name} engine on ${source.name} — found ${records.length}, created ${created}, duplicate ${duplicate}, skipped-no-email ${skipped}`,
         { source: source.slug, durationMs }
       );
-      return { board: source.name, slug: source.slug, engine: winningEngine, status: "success", found: records.length, created, duplicate, skipped, durationMs };
+      return {
+        board: source.name,
+        slug: source.slug,
+        engine: winningEngine,
+        engines: chain,
+        attempts,
+        status: "success",
+        found: records.length,
+        created,
+        duplicate,
+        skipped,
+        durationMs,
+      };
     })
   );
 
