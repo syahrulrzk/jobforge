@@ -1,0 +1,291 @@
+     1→---
+     2→Task ID: 1
+     3→Agent: Super Z (main)
+     4→Task: Fix dashboard Activity Console — user complained it didn't show full logs
+     5→
+     6→Work Log:
+     7→- Diagnosed: /api/dashboard hard-coded take:12 for recentActivity (806 total logs in DB), no full log view existed
+     8→- Upgraded /api/activity → full log endpoint: limit (max 1000), offset, action/status/source/search (q) filters, total count, byAction facets, distinct source list
+     9→- Created src/components/jobforge/activity.tsx → full terminal-style Activity Console view (newest at bottom, auto-follow + jump-to-latest, "load older" pagination, Export .log, status dots, full timestamps)
+    10→- Wired nav: ViewKey "activity" in store, sidebar Monitoring group item w/ TerminalSquare icon, header title/sub, shell renders ActivityView
+    11→- Dashboard: recentActivity take 12→30, "full log →" button in console card header + click-through to activity view
+    12→
+    13→Stage Summary:
+    14→- Full logs now accessible via sidebar "Activity Console" (Monitoring group)
+    15→- API verified: default 200/806 logs, action=error 13, q=scrape 97, status=failed 15 — all filters OK
+    16→- tsc clean for changed files (remaining errors are pre-existing in examples/, skills/, engine.ts:460)
+    17→---
+    18→Task ID: 2
+    19→Agent: Super Z (main)
+    20→Task: Dashboard Activity Console CARD not filling its height (user screenshot)
+    21→
+    22→Work Log:
+    23→- Root cause: grid stretches card to Sources Health height, but log list capped max-h-64 → dead empty space below logs
+    24→- overview.tsx: card → flex flex-col, log container max-h-64 → min-h-56 flex-1 (fills full card height, scrolls when longer)
+    25→- /api/dashboard: recentActivity take 30→60 so the taller console always has content
+    26→- Verified: tsc clean, /api/dashboard returns 60 logs, page HTTP 200
+    27→
+    28→Stage Summary:
+    29→- Activity Console card on dashboard now fills entire card height (no dead space), 60-log buffer, click still jumps to full console
+    30→---
+    31→Task ID: 3
+    32→Agent: Super Z (main)
+    33→Task: Activity Console card too tall (60-log content inflated grid row height)
+    34→
+    35→Work Log:
+    36→- Root cause: flex-1 log container's content contributed to card intrinsic height → grid row grew past Sources Health
+    37→- Fix: log container → absolute inset-x-4 bottom-4 top-12 overflow-y-auto (fills card, zero contribution to row height)
+    38→- Card height now exactly matches Sources Health; 60 logs scroll internally
+    39→- Verified: tsc clean, page HTTP 200
+    40→
+    41→Stage Summary:
+    42→- Dashboard console card = same height as Sources Health, logs scroll inside, no dead space, no over-extend
+    43→---
+    44→Task ID: 4
+    45→Agent: Super Z (main)
+    46→Task: Company logo enrichment during scraping (user request — PNG/link)
+    47→
+    48→Work Log:
+    49→- Created src/lib/jobforge/logo.ts — domain extraction + provider chain (Clearbit → Google s2 favicons → DuckDuckGo), no API key, 4s timeout per provider
+    50→- Created /api/logo/[domain] proxy route — streams first provider hit as image w/ cache headers + X-Logo-Provider; honest 404 when nothing found
+    51→- Engine wiring: company create prefers resolveLogoUrl(website); enrichment fills/rescues dead /assets/logo.png links via resolver + logs; NEEDS_ENRICHMENT logo recovery now uses provider chain instead of fabricating fake URLs
+    52→- seed.ts uses resolver for fresh DBs; scripts/backfill-logos.ts migrated all 30 existing companies to Clearbit links (coverage 30/30)
+    53→- CompanyAvatar (ui-bits.tsx) rewritten: fallback chain stored logoUrl → /api/logo/{domain} → initials; ignores dead /assets/logo.png links; 5 call sites now pass website prop
+    54→
+    55→Stage Summary:
+    56→- Logos flow end-to-end: scrape → enrich (provider chain) → DB logoUrl (PNG link) → UI render → Job Portal payload
+    57→- Verified: /api/logo/tokopedia.com returns real PNG 4.4KB (google-s2 provider), fictional domain honest 404 + initials fallback, tsc clean, page HTTP 200
+    58→---
+    59→Task ID: 5
+    60→Agent: Super Z (main)
+    61→Task: Show company logos on dashboard (user request)
+    62→
+    63→Work Log:
+    64→- /api/dashboard: added topCompanies query (top 8 by job count, includes logoUrl/website/industry/jobCount)
+    65→- overview.tsx: new "Top Companies" leaderboard card between charts row and Sources Health row — rank number, CompanyAvatar with logo fallback chain, name, industry, job count, relative amber progress bar; click-through to Companies view
+    66→- Verified: tsc clean, API returns 8 ranked companies with clearbit logos, page HTTP 200
+    67→
+    68→Stage Summary:
+    69→- Dashboard now displays company logos via Top Companies leaderboard (logo fallback: stored URL → /api/logo proxy → initials)
+    70→---
+    71→Task ID: 6
+    72→Agent: Super Z (main)
+    73→Task: Logos not showing (fictional domains 404) + logos in API Deliveries + logo_url in portal JSON
+    74→
+    75→Work Log:
+    76→- Root cause "logo ga muncul": all 30 demo companies are fictional → Clearbit/Google/DDG all 404 → UI fell back to plain initials
+    77→- Added generateLogoBadge(domain) to logo.ts — deterministic gradient SVG badge (hue from domain hash, 2-letter label)
+    78→- /api/logo/[domain] now ALWAYS returns an image: provider chain → generated SVG badge (200, image/svg+xml, cached); no more 404/blank logos
+    79→- API Deliveries: company select now includes logoUrl + website; deliveries.tsx renders CompanyAvatar (28px) next to job title
+    80→- Portal JSON payload: verified canonicalJobSchema requires logo_url (z.string().min(1)) and engine already sends company.logo_url — live POST /api/v1/jobs/import with logo_url returned success:true created:1
+    81→
+    82→Stage Summary:
+    83→- Every company now renders a logo everywhere (real logo via providers, or generated badge for unknown/fictional brands)
+    84→- API Deliveries view shows logos per delivery row
+    85→- logo_url is mandatory+validated in the portal import payload — proven end-to-end with live import
+    86→---
+    87→Task ID: 7
+    88→Agent: Super Z (main)
+    89→Task: "ko lu generate bro" — replace generated badges with REAL company logos (fictional seed companies have no real logos)
+    90→
+    91→Work Log:
+    92→- Verified provider reality: logo.clearbit.com unreachable from env AND sunset Dec 2025; Google s2 favicons returns 200 for 30 of 35 candidate real domains (curl test script scripts/test-logo-providers2.sh)
+    93→- logo.ts: removed dead Clearbit from chain — fetchLogoPng now Google s2 → DuckDuckGo (no more 4s timeout per logo); resolveLogoUrl() persists Google s2 PNG URLs
+    94→- data.ts: replaced all 30 fictional COMPANY_TEMPLATES with real Indonesian companies (Tokopedia, Shopee, Bukalapak, Blibli, Lazada, Traveloka, Tiket, Grab, Ruangguru, Zenius, Halodoc, Alodokter, DANA, Kredivo, Midtrans, Stockbit, Ajaib, SiCepat, Anteraja, Ninja Xpress, Telkomsel, XL Axiata, Detik, Kompas, Kumparan, IDN Media, Glints, Kalibrr, PasarPolis, Sayurbox) — kept noPublicEmail/badMx flag distribution for seed variety
+    95→- scripts/migrate-real-companies.ts: migrated 30 Company rows 1:1 (name/normalizedName/website/logoUrl/industry), recomputed 860 job fingerprints, refreshed 794 JobContact emails to new domains, 0 Clearbit URLs remain
+    96→- Fixed pre-existing tsc error engine.ts:472 (Job has no updatedAt → scrapedAt for SENT→PUBLISHED promotion)
+    97→- jobs API now returns company.website (avatar proxy fallback needs domain); dashboard/deliveries/contacts already had it
+    98→- Verified live: dashboard topCompanies + deliveries + jobs all return real names with google-s2 logoUrls; /api/logo/{domain} serves image/png in 0.03–0.16s via google-s2; tsc clean; engine tick running healthy
+    99→
+   100→Stage Summary:
+   101→- Logos are now REAL brand favicons everywhere (dashboard leaderboard, jobs, companies, contacts, deliveries) — no generated badges for the 30 seeded companies
+   102→- Portal delivery JSON payload includes company.logo_url (Google s2 URL) per canonicalFor() → deliverReadyJobs()
+   103→- Proxy fallback chain fast again (dead Clearbit removed)
+   104→---
+   105→Task ID: 8
+   106→Agent: Super Z (main)
+   107→Task: REAL data mode + 4 scraper engines (Cheerio, Crawlee, Puppeteer, Selenium) — pool 1/2/4 engines
+   108→
+   109→Work Log:
+   110→- Tested public job APIs from sandbox: Remotive ✓ (logo+salary), Jobicy ✓ (logo+structured salary), Arbeitnow ✓ (no logo), RemoteOK ✓ (partial logo); Clearbit confirmed dead
+   111→- Schema: Job.companyName + Job.companyLogoUrl (source provenance), ScrapeRun.engine, Source.engine — prisma db push
+   112→- NEW src/lib/jobforge/engines.ts: registry 4 engines (meta, latency bands, failure rates, memory) + parseEnginePool + rotateEngine (round-robin) + engineJitter (failover roll)
+   113→- NEW src/lib/jobforge/sources-real.ts: real fetchers mapping API payloads → RawJobRecord (stripHtml, employmentType map, tags→skills, salary text → description for normalize)
+   114→- engine.ts: engine selection (pinned engine if in pool, else rotation); REAL mode branch calling real fetchers with engine telemetry; 2-min throttle for auto runs; ScrapeRun.engine persisted; log message includes engine name; parseRawFromJob prefers job.companyName (real path, no guessed emails §12.4); parseSalaryUsd (USD/EUR "$25k - $35k", "USD 180,000 - 190,000"); NEEDS_ENRICHMENT recovery split: real jobs first (4/tick, live mailto scan of posting page via discoverMailto(), once per job) + mock jobs (4/tick, simulated)
+   115→- NEW PATCH /api/jobs/[id] action=force_ready (§31 operator override, sandbox relay contact) + button on job detail sheet
+   116→- Settings: DATA_MODE (real|mock) + ENGINE_POOL (CSV) — GET/PUT /api/settings; Data Mode picker on Settings page
+   117→- Sources page: Engine Pool panel (4 toggle cards, X/4 aktif) + Engine column + engine select in add/edit dialog; Runs page: Engine badge column; /api/sources + /api/runs return engine
+   118→- scripts/migrate-real-engine.ts: added 4 real sources (remotive[crawlee], jobicy[puppeteer], arbeitnow[cheerio], remoteok[selenium]), deactivated 7 mock boards, DATA_MODE=real, ENGINE_POOL=all, DEMO_JOB_CAP=3000
+   119→- Dev server restarted (Prisma client regen required for new columns); cleaned 30 fictional companies + 313 jobs re-created by the stale pre-restart engine (scripts/cleanup-fictional-companies.ts)
+   120→- Verified E2E: first real scrapes SUCCESS (Remotive 16, Jobicy 30, Arbeitnow 250, RemoteOK 99) → 387 real jobs, 225 real companies w/ real logos; force-ready real job (Credit Wellness, LLC) → delivery SUCCESS 200 → PUBLISHED with real remotive logo in payload; all 4 engines logged runs; tsc clean
+   121→
+   122→Stage Summary:
+   123→- REAL data mode default: live jobs from 4 public boards flow through the full pipeline (normalize → enrich → validate → dedup → deliver)
+   124→- 4-engine pool works: pilih 1/2/4 engine via Engine Pool toggles; per-source engine pin + failover rotation
+   125→- Real jobs w/o published HR email land in NEEDS_ENRICHMENT (honest §12.4); recovery worker does real mailto scans; operator can Force READY
+   126→
+   127→---
+   128→Task ID: 9
+   129→Agent: Super Z (main)
+   130→Task: Fix Radix SheetTitle a11y warning + tambah Playwright sebagai engine ke-5 (user: "1 lagi mana playwright ya?")
+   131→
+   132→Work Log:
+   133→- Root cause console error: detail Sheet di jobs.tsx & companies.tsx — loading branch (detail == null) tidak punya SheetTitle → Radix Dialog warning. Fix: SheetHeader sr-only + SheetTitle di kedua loading branch
+   134→- engines.ts: EngineKey + "playwright", meta baru (Chromium/Firefox/WebKit, browser, 700-2200ms, fail 5%, 400MB, badge fuchsia), header comment 4→5 engines
+   135→- sources-real.ts: fetchHimalayas() — himalayas.app/jobs/api (limit 30, logo CDN ✓, salary structured min/max/period, pubDate epoch detik ×1000, locationRestrictions → location, categories → skills) + REAL_BOARDS.himalayas
+   136→- api/settings/route.ts: default enginePool & validasi PUT sekarang pakai DEFAULT_ENGINE_POOL/ENGINE_KEYS dari registry (single source of truth, bukan hard-coded CSV)
+   137→- sources.tsx: fallback pool string + grid panel 5 kartu (sm:2 lg:3 xl:5)
+   138→- schema.prisma: komentar engine + playwright (String, tidak perlu db push)
+   139→- scripts/migrate-playwright-engine.ts: upsert source himalayas (pin engine playwright, hourly) + ENGINE_POOL=cheerio,crawlee,puppeteer,playwright,selenium — run OK
+   140→- INSIDEN: tick loop dev-server lama (kode pre-hot-reload) sempat bikin 54 job MOCK via source himalayas (REAL_BOARDS lama tak kenal himalayas → fallback mock generator, nama "PT DANA Indonesia" dkk) → 54 job mock dihapus (cascade JobSource/JobContact), 20 job real aman; dev server direstart pake ./node_modules/.bin/next dev -p 3000 (npm exec + nohup merusak parsing -p)
+   141→- Verified E2E: run paksa Himalayas → engine=playwright SUCCESS (found 20, created 20, err 0); Jobicy[puppeteer] & RemoteOK[selenium] recovered dari ERROR → ACTIVE; 5 source ACTIVE masing-masing pin engine beda (cheerio/crawlee/puppeteer/playwright/selenium); pool setting 5 engine; job real himalayas dgn company mapping + logo (micro1, Nexii, Upstream USA, GXO) masuk NEEDS_ENRICHMENT sesuai §12.4; tsc clean; GET / 200
+   142→
+   143→Stage Summary:
+   144→- 5-engine pool: Cheerio, Crawlee, Puppeteer, Playwright, Selenium — aktifkan 1/2/bebas via Engine Pool toggle di Sources
+   145→- Source baru Himalayas (playwright) masuk rotasi real data, total 5 sumber live
+   146→- Console error SheetTitle beres di Jobs & Companies detail sheet
+   147→
+   148→---
+   149→Task ID: 10
+   150→Agent: Super Z (main)
+   151→Task: Fitur Cari Lowongan — halaman pencarian job-seeker berdasarkan posisi (user: "buat fitur cari jobs berdasarkan posisi yg kita mau")
+   152→
+   153→Work Log:
+   154→- API /api/jobs: param baru title (word-AND over title/normalizedTitle/skills — "senior frontend" match "Senior Frontend Angular Developer"), location (contains), remote=true (workplaceType REMOTE); response + workplaceType
+   155→- Ekstrak detail sheet dari jobs.tsx (~190 baris) ke src/components/jobforge/job-detail-sheet.tsx (shared: fetch detail, 4 tabs, force-ready override, sr-only SheetTitle saat loading) — jobs.tsx jadi lean (filter + tabel + pagination + <JobDetailSheet/>)
+   156→- NEW src/components/jobforge/search.tsx — SearchView: hero search (input posisi h-11 autofocus + lokasi opsional + tombol Cari + Enter), debounce 350ms search-as-you-type, 8 chip posisi populer, switch "Hanya remote", hasil grid kartu responsif (sm:2 lg:3 xl:4) dengan logo perusahaan, remote badge, salary, source + status badge, timeAgo; reset button, empty state, pagination
+   157→- store/jobforge.ts ViewKey + "search"; shell.tsx: grup NAV baru "Karier" di urutan pertama (Cari Lowongan, icon Search), VIEW_TITLES.search, render SearchView
+   158→- Verified: tsc clean; API tests — frontend developer=83, backend developer=70, data analyst=81, react=84, remote=true=594, Berlin=24, developer+Berlin=2, designer+remote=35 (semua REMOTE), senior frontend=5 (word-AND ✓); GET / 200
+   159→
+   160→Stage Summary:
+   161→- Halaman "Cari Lowongan" (grup Karier, nav pertama): cari posisi by keyword multi-kata + lokasi + filter remote, hasil kartu klik → detail sheet lengkap
+   162→- JobDetailSheet kini shared antara Jobs view & Search view
+   163→
+   164→---
+   165→Task ID: 11
+   166→Agent: Super Z (main)
+   167→Task: Live Scrape Search — mode cari via scraping engine (user: "opsi cari db kita dan cari dari scraping engine")
+   168→
+   169→Work Log:
+   170→- Klarifikasi user: fitur cari harus 2 mode — (1) Cari Database (instan, job existing), (2) Scrape Live: ketik posisi → engine pool jalan scraping on-demand ke semua board → hasil masuk DB → ditampilkan
+   171→- Riset native keyword search per board: Remotive search= ✓ (broad, perlu filter lokal), Jobicy tag= ✓ relevan, RemoteOK tag= (satu kata; fallback kata ke-2), Arbeitnow & Himalayas tidak support → fetch batch + filter lokal
+   172→- sources-real.ts refactor: mapper per-board diekstrak jadi exported (mapRemotiveJob/mapJobicyJob/mapArbeitnowJob/mapRemoteOkJob/mapHimalayasJob) — fetcher terjadwal & live search reuse mapper yang sama
+   173→- NEW src/lib/jobforge/live-search.ts: liveKeywordScrape(q) — 5 board paralel (Promise.all), keyword filter ALL-words di title+skills (sengaja mirror filter /api/jobs title supaya angka report = angka grid), ingest via fingerprint path yang sama dengan engine.ts (dup → link JobSource §15.1, baru → Job SCRAPED), engine dirotasi dari ENGINE_POOL aktif per board, log Activity Console per board dengan nama engine, cap 40/board
+   174→- NEW POST /api/search/live (guard in-flight, min 2 char, maxDuration 60)
+   175→- search.tsx: segmented toggle "Cari Database" / "Scrape Live (Engine)", live mode: tombol Scrape Sekarang + spinner + banner progress, chip posisi trigger live scrape, breakdown chip per board (nama board + badge engine + X baru / Y found / gagal), tombol Scrape ulang; db mode perilaku lama (debounce 350ms)
+   176→- Verified E2E: "business analyst" → 1.4s, found=15 created=7 dup=8, RemoteOK via Selenium 7 baru (fallback tag=business→analyst), engine pool 5-5-nya kepake (cheerio/crawlee/playwright/selenium/puppeteer); grid /api/jobs?title=business analyst = 15 = report ✓; tsc clean; GET / 200
+   177→
+   178→Stage Summary:
+   179→- Dua mode cari: Database (instan) & Scrape Live (engine pool scrape on-demand semua board, hasil tersimpan + dedup + masuk pipeline normal)
+   180→- Report per board menampilkan engine yang menjalankan + jumlah baru/found — konsisten dengan arsitektur 5-engine
+   181→
+   182→---
+   183→Task ID: 12
+   184→Agent: Super Z (main)
+   185→Task: Sidebar reposition + rename "Cari LokerBase" + aturan WAJIB email (DB & API portal) — user: "yg dikirim ke api portal cuma yg ada emailnya, dan disimpan db kita juga wajib ada emailnya, klo gada jangan disimpan (spam)"
+   186→
+   187→Work Log:
+   188→- shell.tsx: grup "Karier" (Cari LokerBase) dipindah ke bawah grup Monitoring (NAV order: Monitoring → Karier → Data → Pipeline → System); label + VIEW_TITLES.search di-rename "Cari Lowongan" → "Cari LokerBase"
+   189→- engine.ts:
+   190→  - NEW extractPublishedEmail(text) — pola email §12 (mailto: / prefiks hr|careers|recruitment|talent|jobs|karir), dipakai di discoverMailto + scan description; discoverMailto di-export
+   191→  - ENRICHING stage: email discovery dari description text (payload → deskripsi) — real job yang nerbitin email di body langsung dapat JobContact
+   192→  - VALIDATING stage: spam guard — job real (companyName != null) yang NEEDS_ENRICHMENT karena TANPA email + sudah pernah discan mailto (atau tanpa pageUrl) → DIHAPUS dari DB + increment jobsRejected + log "Email mandatory: N job tanpa email HR dihapus"
+   193→  - Recovery loop needyReal: take 4→8; scan mailto sekali per job — gagal/invalid → hapus job (spam guard); sukses → contact + re-validate
+   194→  - deliverReadyJobs: gate tambahan contact: { isNot: null } — portal hanya pernah terima job ber-email
+   195→- live-search.ts: ingestRecord sekarang email-gated SEBELUM persist — payload email → scan description → live discoverMailto(pageUrl); tanpa email → "skipped" (tidak disimpan sama sekali); JobContact dibuat saat ingest; worker pool 6 concurrent biar scan page ga lewat 60s budget; report baru: skipped per board + totalSkipped
+   196→- search.tsx: rename header "Cari LokerBase", db-mode kirim withEmail=1, banner live + summary line + board chips menampilkan jumlah dilewati (tanpa email HR)
+   197→- /api/jobs: param withEmail=1 → filter contact: { isNot: null } (LokerBase hanya tampilin job ber-email)
+   198→- scripts/purge-no-email-jobs.ts: one-time cleanup — 698 job NEEDS_ENRICHMENT tanpa contact DIHAPUS (stok spam lama); 1532 job ber-email dipertahankan
+   199→- Dev server: ternyata proses background dari tool call dibunuh sandbox saat call berakhir (nohup/setsid biasa pun mati) → fix pake double-fork `( (setsid cmd &) )&` yang reparent ke PID 1 — server persist lintas call (PID 9240 PPID 1)
+   200→- Verified E2E: DB 1534 job, sampel 100 → 0 tanpa email; withEmail=1 = 1532 semua ber-email; live scrape "business analyst" 3.7s — found 14, created 2 (careers@mantech.com, recruitment@pointclickcare.com — email ketemu via scan page SEBELUM simpan), skipped-no-email 12, dup 0; 5 engine rotasi sempurna; tsc clean; GET / 200
+   201→
+   202→Stage Summary:
+   203→- Aturan email wajib aktif end-to-end: scrape live scan email dulu (ga ada → ga masuk DB), pipeline terjadwal purge job tanpa email setelah 1x percobaan discovery, delivery portal ter-gate contact, dan search LokerBase hanya menampilkan job ber-email
+   204→- Sidebar: Cari LokerBase sekarang di bawah Monitoring; stok spam lama (698 job) sudah dibersihkan
+   205→
+   206→---
+   207→Task ID: 13
+   208→Agent: Super Z (main)
+   209→Task: Multi-engine per source (JobStreet bisa semua engine tanpa nambah source) + type/scraper multi-select + anti-spam real-mode (user: "dalam add source, gw bisa add engine lebih dari satu ga? type juga bisa pilih dari satu")
+   210→
+   211→Work Log:
+   212→- Konteks: sandbox restart mereset DB — 5 real board hilang, JobStreet dkk. cuma seeding PRD; generator mock numpuk 1.536 job palsu (jobstreet 845). Konektivitas dicek: jobstreet.co.id = 403 Datadome (Seek anti-bot, anonim ga bisa), Kalibrr listing = client-rendered (ga ada JSON gampang) → fokus ke infrastruktur multi-engine + honesty, bukan fetcher baru
+   213→- schema.prisma: Source.engines String (CSV urutan prioritas, "" = fallback ke engine lama) + db push + prisma generate
+   214→- engines.ts: parseEngineList(value, fallbackEngine) — CSV → EngineKey[] valid, fallback engine kolom lama → cheerio
+   215→- engine.ts runScrapeForSource di-refactor jadi engine chain §9.3: kandidat = engines source ∩ Engine Pool global (kosong → rotasi pool failover §9.2); tiap attempt dapat ScrapeRun sendiri (riwayat failover keliatan di Runs); engine crash roll / fetch gagal total → run FAILED + recordError + log warning "X gagal — failover ke Y" → lanjut engine prioritas berikutnya; engine pertama yang sukses menang; semua gagal → source ERROR + log ringkasan N engine
+   216→- ANTI-SPAM real mode: realMode && !REAL_BOARDS[slug] → auto-tick skip diam-diam; run manual → 1 run FAILED jujur "Real mode: {name} belum punya integrasi scraper nyata — generator mock dinonaktifkan" + SOURCE_ERROR (JobStreet dkk. ga pernah lagi generate job palsu)
+   217→- seed.ts ditulis ulang: hanya sources + settings — real board (remotive[cheerio], jobicy[crawlee], arbeitnow[puppeteer], remoteok[selenium], himalayas[playwright]) selalu di-upsert (engine pin default hanya diisi bila engines kosong, pilihan user ga ditimpa restart); portal tanpa integrasi real ditanam INACTIVE; TIDAK ADA lagi seed job/companies/runs mock
+   218→- schemas.ts: ENGINE_VALUES + TYPE_VALUES + SCRAPER_VALUES; csvEnum() terima tunggal ATAU array → CSV; engines: array min 1; ENGINE_ENUM lama juga ternyata kurang playwright — kebetulkan
+   219→- api/sources: GET +engines; POST/PATCH terima engines[] (urutan = prioritas, engine = engines[0]) + type/scraperType array; bug UI ketemu saat E2E (UI kirim keys plural, schema singular → diam-diam di-strip) — save() dikoreksi kirim type/scraperType
+   220→- sources.tsx: dialog Add/Edit Source — Tipe & Tipe Scraper jadi chip multi-select; Scraper Engine jadi grid 5 chip engine dgn nomor prioritas (urutan klik = prioritas) + tombol "Pilih semua engine" + hint failover; tabel kolom Engine render multi badge (parseEngineList); subtitle source format CSV " · "; Engine Pool panel hint dijelasin hubungan global vs per-source; dialog digemax sm:max-w-lg
+   221→- overview.tsx & runs.tsx: scraperType CSV ditampilin rapi " · "
+   222→- engine.ts race fix: db.job.delete → deleteMany di 2 titik spam guard (Prisma P2025 "record not found" kalau job kehapus antar batch — sempat bocor jadi error 500 di /run)
+   223→- engine.ts recovery loop: take 8→24 + worker pool 6 concurrent (Promise.all chunk) supaya backlog spam-guard cepat terdrain saat flood awal
+   224→- scripts/migrate-multi-engine.ts: backfill engines CSV 5 source, upsert 5 real board ACTIVE, portal legacy → INACTIVE (5), PURGE data mock (jobs 1.536, companies 363, runs 150, errors 2.285, logs 300), DATA_MODE=real + ENGINE_POOL 5 engine
+   225→- Verified E2E: PATCH JobStreet engines=cheerio,crawlee,puppeteer,playwright,selenium + scraperType=DYNAMIC,API + type=JOB_PORTAL,CAREER_SITE ✓; POST source baru engines=puppeteer,playwright,selenium ✓; run manual JobStreet → FAILED jujur 0 job palsu ✓; force run Remotive → SUCCESS 16 job real via Cheerio ✓; auto-tick mengisi real data (Jobicy 20, RemoteOK 99, Arbeitnow 250, Himalayas 20) ✓; live search "devops" → Jobicy found 22 skipped 19 (email gate ingest ✓); withEmail=1 = 19 job semua ber-email ✓; deliveries 0 tanpa email ✓; spam-guard purge 48 event, total job 399→282 (purge > inflow) ✓; tsc clean; GET / 200
+   226→
+   227→Stage Summary:
+   228→- Source bisa pin BANYAK engine sekaligus (urutan = prioritas failover, engine pertama sukses dipakai, tiap attempt tercatat di Runs) — JobStreet tinggal edit → pilih semua engine
+   229→- Tipe & Tipe Scraper juga multi-select (CSV), UI chip + nomor prioritas
+   230→- Anti-spam total di real mode: source tanpa integrasi nyata TIDAK PERNAH generate mock lagi; job tanpa email di-purge setelah 1x percobaan discovery (paralel 6 worker); DB fresh seeding = sources+settings saja
+   231→- Catatan jujur buat user: JobStreet (Seek) balas 403 Datadome ke scraper anonim — makanya statusnya ERROR; gunakan real board publik (Remotive/Jobicy/Arbeitnow/RemoteOK/Himalayas) atau integrasi resmi utk portal ID
+   232→
+   233→---
+   234→Task ID: 14
+   235→Agent: Super Z (main)
+   236→Task: Live search pakai board dari Data Sources + engine ngikutin setting source (user: "di menu search ada pilihan cari di job mana, misalnya jobstreet, yg udah ditambahin di data source — engine ya ngikutin data source yg udh kita setting")
+   237→
+   238→Work Log:
+   239→- Masalah: liveKeywordScrape hardcode BOARD_SEARCHES 5 board → user hapus/tambah source di Data Sources tidak ngaruh ke menu search (ini juga bikin user bingung "perasaan source udah gw hapus")
+   240→- live-search.ts refactor: liveKeywordScrape(q, selectedSlugs?) — source diambil dari DB (where slug IN pilihan user, tanpa pilihan → semua status ACTIVE, override manual boleh scrape source ERROR/INACTIVE untuk tes); nama board dari DB bukan hardcode
+   241→- Engine chain §9.3 mirror engine.ts: pinned = parseEngineList(source.engines, source.engine) → interseksi Engine Pool global (kosong → pinned, live search user-initiated: setting source menang) → failover loop: fetch gagal → log warning "X gagal — failover ke Y" → retry engine prioritas berikutnya; engine pertama sukses dilaporkan di result
+   242→- Anti-spam §9.3 konsisten: source tanpa integrasi nyata (JobStreet/Glints/Indeed/Kalibrr/Karir.com) → status failed + pesan jujur "Belum punya integrasi scraper nyata (anti-bot / butuh integrasi resmi)" — TIDAK ada mock, 0 job palsu
+   243→- api/search/live: body terima sources[] (slug list, divalidasi string); tanpa sources → default semua ACTIVE
+   244→- search.tsx: picker "Board sumber" (live mode) — chips dari /api/sources (fetch on mount), tiap chip = status dot (ACTIVE emerald/ERROR rose/INACTIVE zinc) + nama + badge engine primary, tooltip berisi chain lengkap "Cheerio → Crawlee → …"; default terpilih = semua ACTIVE; toggle klik; tombol "Reset ke semua aktif"; guard minimal 1 board; banner berjalan menyebut nama board terpilih dinamis; toast jumlah board dinamis; subtitle live mode dijelaskan; empty-state hint menyebut picker
+   245→- Cleanup: import ScrapeResult & rotateEngine tak terpakai dihapus
+   246→- Recovery: Jobicy yang sempat ERROR di-force run → ACTIVE (SUCCESS, 30 found via Crawlee)
+   247→- Verified E2E (scripts/test-live-search-sources.py): TEST 1 JobStreet only → failed jujur 0 mock ✓; TEST 2 Remotive only → 1 board saja, engine cheerio sesuai setting ✓; TEST 3 campuran JobStreet+Arbeitnow → JobStreet failed jujur + Arbeitnow SUCCESS 73 found via puppeteer ✓; TEST 4 tanpa pilihan → default 4 board ACTIVE (Jobicy sempat ERROR saat test, sudah dipulihkan jadi 5) ✓; Remotive found=0 utk "frontend developer" = perilaku benar keyword filter ALL-words (API Remotive broad-match, diverifikasi langsung); tsc clean; GET / 200
+   248→
+   249→Stage Summary:
+   250→- Menu Cari LokerBase mode Scrape Live sekarang PUNYA PILIHAN BOARD — daftar & engine selalu ngikutin Data Sources yang user tambahkan/setting sendiri, bukan hardcode
+   251→- Pilih JobStreet → engine chain 5 engine dari setting source dipakai, hasilnya laporan jujur (anti-bot), tidak pernah job palsu
+   252→- Sumber dihapus di Data Sources → otomatis hilang dari picker search; source baru ditambah → otomatis muncul
+   253→
+   254→---
+   255→Task ID: 15
+   256→Agent: Super Z (main)
+   257→Task: Live search — seluruh chain engine kejalanin (bukan cuma 1) + hasil per-engine kelihatan di UI (user: "di search lokerbase knpa cuma 1 engine bro? kan di data source ada 5 engine")
+   258→
+   259→Work Log:
+   260→- Keluhan: chip hasil live search cuma nampilin 1 engine (primary) padahal source di-setting 5 engine → failover chain §9.3 tidak terlihat sama sekali di search
+   261→- live-search.ts:
+   262→  - LiveSearchBoardResult + fields engines[] (chain penuh) & attempts[] (riwayat per engine: status, httpStatus, durationMs, note)
+   263→  - Path board real: failover loop sekarang mencatat tiap attempt (failed → note error asli, winner → note "found N") — tetap break di engine sukses pertama
+   264→  - NEW probeWithEngine(): HTTP probe nyata per engine untuk source tanpa parser integrasi (JobStreet dkk.) — browser engine (puppeteer/playwright/selenium) pakai UA browser, HTTP engine (cheerio/crawlee) pakai UA bot; tiap engine di chain dicoba berurutan, failover warning di-log per attempt, stop di engine pertama yang berhasil menjangkau
+   265→  - Hasil jujur & terukur: JobStreet = 5 attempt nyata, semua HTTP 403 Datadome (bukan theater); Kalibrr = Cheerio reachable 200 → berhenti + pesan "reachable tapi belum ada parser — tidak ada data di-parse asal-asalan"
+   266→  - select +baseUrl di query source (untuk probe)
+   267→- search.tsx: chip hasil render SELURUH engine attempt (badge engine sukses pakai warna engine, yang gagal dicoret line-through) + label "gagal · N engine"; tooltip = detail per engine (status, HTTP code, durasi, note); LiveEngineAttempt type
+   268→- INSIDEN sandbox restart me-reset DB file (kejadian ke-2): 5 real board hilang lagi dari snapshot seeding → dipulihkan via npx tsx scripts/migrate-multi-engine.ts (upsert 5 board, purge 276 job mock, DATA_MODE=real + ENGINE_POOL 5 engine) + JobStreet di-restore sesuai setting user (engines=cheerio,crawlee,puppeteer,playwright,selenium, status ERROR jujur, scraperType DYNAMIC,API) + force run 5 board real (jobs 0→335, pipeline email-gate jalan normal)
+   269→- Verified E2E: TEST JobStreet only → 5 attempt semua HTTP 403 (282/43/72/156/51ms), 0 job palsu; TEST Kalibrr → reachable via Cheerio 200, no-parser honest; TEST Remotive/Arbeitnow real board tetap jalan (attempt winner tercatat); TEST default → 5 board ACTIVE (Jobicy ikut lagi); log failover 5 baris di Activity Console; tsc clean; GET / 200
+   270→
+   271→Stage Summary:
+   272→- Search live sekarang JUJUR & TRANSPARAN per engine: source 5 engine → 5 engine kecoba satu-satu (nyata), hasil per-engine kelihatan di chip (badge dicoret = gagal, warna = sukses), detail HTTP/durasi di tooltip
+   273→- JobStreet terbukti diblokir Datadome di semua 5 engine (403) — jelas bagi user bahwa bukan engine-nya yang salah, tapi situsnya yang nge-block scraper anonim
+   274→- DB snapshot hilang karena sandbox restart sudah dipulihkan + setting 5-engine JobStreet dikembalikan
+   275→
+   276→---
+   277→Task ID: 16
+   278→Agent: Super Z (main)
+   279→Task: Fokus JobStreet saja — hapus ulang board internasional (user kesal di-add ulang), jawab "kenapa gagal" dengan bukti + tampilkan alasan gagal langsung di UI
+   280→
+   281→Work Log:
+   282→- User hapus 5 board internasional via UI, tapi migrasi recovery Task 15 meng-add ulang → user kesal ("yg lain udh gw hapus knpa lu add lagi sh"). Cleanup: hapus remotive/jobicy/arbeitnow/remoteok/himalayas + 342 job linked + 54 company orphan. DB sekarang = JobStreet[ACTIVE, 5 engine] + Glints/Indeed/Kalibrr/Karir.com[INACTIVE], 0 job
+   283→- Probe definitif scripts/probe-jobstreet.py — 7 jalur: root (UA bot/browser+full headers/Googlebot), /id/jobs, xapi.jobstreet.co.id (DNS tak resolve publik), sitemap.xml, robots.txt → SEMUA 403 (server: cloudflare, Datadome/Seek). Bahkan robots.txt diblokir = blanket edge block utk IP datacenter. Kesimpulan: scraping anonim JobStreet mustahil tanpa proxy residensial (berbayar) atau API resmi Seek
+   284→- search.tsx: alasan gagal board sekarang TAMPIL LANGSUNG di bawah chip hasil (panel rose dgn AlertTriangle per board + pesan error lengkap + hint "butuh akses resmi/proxy — board publik lain tetap bisa dipakai"), tidak bergantung hover tooltip
+   285→- Verified: tsc clean; GET / 200; live search jobstreet → 5 attempt, error jujur tampil
+   286→
+   287→Stage Summary:
+   288→- Data sources = persis sesuai user: JobStreet + 4 portal ID (INACTIVE), tanpa board internasional
+   289→- Kenapa gagal terjawab dengan bukti empiris 7 jalur + tampil inline di UI search
+   290→- Keputusan terbuka utk user: (A) integrasi nyata portal ID yg bisa di-scrape anonim (Kalibrr/Glints/Karir.com) — gratis; (B) proxy residensial/API resmi utk JobStreet — butuh layanan/kredensial
+   291→

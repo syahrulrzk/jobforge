@@ -1,0 +1,36 @@
+[
+  {
+    "name": "cf_clearance",
+    "value": "LDyNWXBv6zydm4NtvvvjNx9puLnjUovNMYuaBjoVFlw-1789139597-1.2.1.1-lK67Zq_yRUf3DjIZQ.sBlMuxNvXzAKdrWevWXDIyMxsC05xMCXK86cUIuNVjwygqJJKQU7Dt.4YOpJFBkOUQmAtljw1DJHnzOs0QLik323E1.2cmJ0L0puSu3smAetVNHOn59TP9mLTmaRhEuoVjUHLToLnVGjXu_S9xz.RmfQ1kyWvsFbrqrKVmOmWDeNjoMHVqn02gM5vBRkQQRZGilkH3pN23QU6gn42IfwOo7h5VhUNRqhoHWV9u1xxQdP0VwOBSKimYIvvixWAA10tTouvhKrCWl6cySKxEhtBrdiwH7yEZfhYz82NYXAfJo5GOGNUyEnUMxFruY2bFFl3QqAsMqKxwlVARynaKy52CQMoinnByUaX2k0dMp5sSGsXPC7WGKB4pupDPRlxAY1o.rlhzH1gz7h2TfKFTnr7LASZVMJQ_WyZgbfQCiaAAlc4XFL5p6dQkWiFBl7GT80InAEZmF4XGoyBFqVAzNLawjyt_RaxHN8cEQqodTAkBYMpnYBJFtClkvT3lhQkN24jATg",
+    "domain": ".jobstreet.com",
+    "path": "/",
+    "expires": 1820675597.979999,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "None",
+    "partitionKey": "https://jobstreet.com",
+    "_crHasCrossSiteAncestor": false
+  },
+  {
+    "name": "cf_chl_rc_ni",
+    "value": "1",
+    "domain": "id.jobstreet.com",
+    "path": "/",
+    "expires": 1789143197,
+    "httpOnly": false,
+    "secure": true,
+    "sameSite": "None",
+    "partitionKey": "https://jobstreet.com",
+    "_crHasCrossSiteAncestor": false
+  },
+  {
+    "name": "__cf_bm",
+    "value": "DSvBccPwlRhR.d8ciXLu5rFmDaRKQ_cTrO06Aa9GjoU-1789139600.2366252-1.0.1.1-4ezeLjaXn5S0.o7Q9PoflrES0uouYHu9pFCyWM9novmLo6JUdtH.z4Z_XvhcWBOc72dVFRmdc3CYLQiILTe5EfSFc8t1UoWrCyScqoCCM.bZwxJPmRtVKM1.H.Sq2vSh",
+    "domain": ".jobstreet.com",
+    "path": "/",
+    "expires": 1789141400.265067,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "None"
+  }
+]

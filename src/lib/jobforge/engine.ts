@@ -239,7 +239,7 @@ async function runScrapeForSource(sourceId: string, forced = false): Promise<voi
     let attempt: ScrapeAttempt;
     if (realMode && realFetcher) {
       try {
-        attempt = await realFetcher();
+        attempt = await realFetcher({ proxyUrl: source.proxyUrl, headersJson: source.headersJson });
       } catch (err) {
         attempt = { records: [], pagesScraped: 1, errors: [realBoardError(source.name, err)] };
       }

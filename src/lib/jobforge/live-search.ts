@@ -25,12 +25,16 @@ import { jobFingerprint, normalizeTitle, validateEmail } from "./pipeline";
 import { ENGINES, parseEngineList, parseEnginePool, type EngineKey } from "./engines";
 import { discoverMailto, extractPublishedEmail, log } from "./engine";
 import { SETTING_KEYS } from "./types";
+import { BROWSER_UA, sourceFetchText, type SourceNetConfig } from "./net";
 import {
   mapRemotiveJob,
   mapJobicyJob,
   mapArbeitnowJob,
   mapRemoteOkJob,
   mapHimalayasJob,
+  mapJobStreetJob,
+  jobStreetSearchUrl,
+  extractJobPostingsFromHtml,
   realBoardError,
 } from "./sources-real";
 
@@ -38,15 +42,14 @@ const FETCH_TIMEOUT_MS = 12_000;
 const MAX_PER_BOARD = 40;
 const UA = "JobForgeBot/1.0 (+https://jobforge.local; live keyword search)";
 
-async function getJson(url: string): Promise<unknown> {
-  const res = await fetch(url, {
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    redirect: "follow",
-    headers: { "User-Agent": UA, Accept: "application/json" },
-    cache: "no-store",
-  });
+async function getJson(url: string, cfg?: SourceNetConfig): Promise<unknown> {
+  const res = await sourceFetchText(url, cfg ?? {}, { accept: "application/json", timeoutMs: FETCH_TIMEOUT_MS });
   if (!res.ok) throw new Error(`${url} responded ${res.status}`);
-  return res.json();
+  try {
+    return JSON.parse(res.text) as unknown;
+  } catch {
+    throw new Error(`${url} returned non-JSON body`);
+  }
 }
 
 /** Keyword relevance — every word must appear in the title or skills.
@@ -57,36 +60,86 @@ function matchesKeyword(rec: RawJobRecord, words: string[]): boolean {
   return words.every((w) => hay.includes(w));
 }
 
+/** Per-attempt fetch context: which engine is trying + the source's own
+ *  network settings (residential proxy, custom clearance headers). */
+interface LiveBoardCtx extends SourceNetConfig {
+  engine: EngineKey;
+}
+
 interface BoardSearch {
   slug: string;
   name: string;
   /** fetch listings for the query (native search param when the board supports it) */
-  search: (words: string[], rawQuery: string) => Promise<RawJobRecord[]>;
+  search: (words: string[], rawQuery: string, ctx: LiveBoardCtx) => Promise<RawJobRecord[]>;
 }
 
-/** Real HTTP probe dengan profil engine — dipakai untuk source yang belum punya
+// ── JobStreet browser path (engine: playwright) ─────────────────
+// Real Chromium via Playwright — the only honest way through the
+// Cloudflare Turnstile interstitial when the exit IP (direct or via
+// the source's residential proxy) gets challenged. If the challenge
+// does not settle headless, fail over honestly — no fake data.
+async function searchJobStreetBrowser(url: string, ctx: LiveBoardCtx): Promise<RawJobRecord[]> {
+  let chromium: typeof import("playwright").chromium;
+  try {
+    ({ chromium } = await import("playwright"));
+  } catch (err) {
+    throw new Error(`Playwright tidak bisa dimuat di host ini: ${err instanceof Error ? err.message.slice(0, 90) : "unknown"}`);
+  }
+  const proxy = (ctx.proxyUrl ?? "").trim();
+  const browser = await chromium.launch({
+    headless: true,
+    ...(proxy ? { proxy: { server: proxy } } : {}),
+    args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage", "--window-size=1366,850", "--lang=id-ID"],
+  });
+  try {
+    const context = await browser.newContext({
+      userAgent: BROWSER_UA,
+      viewport: { width: 1366, height: 850 },
+      locale: "id-ID",
+      timezoneId: "Asia/Jakarta",
+      extraHTTPHeaders: { "Accept-Language": "id-ID,id;q=0.9,en;q=0.8" },
+    });
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      Object.defineProperty(navigator, "languages", { get: () => ["id-ID", "id", "en"] });
+      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
+      (window as unknown as Record<string, unknown>).chrome = { runtime: {} };
+    });
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
+    const CHAL = /just a moment|tunggu sebentar|attention required/i;
+    for (let i = 0; i < 4; i++) {
+      if (!CHAL.test(await page.title())) break;
+      await page.waitForTimeout(3_000); // beri waktu challenge JS auto-solve di IP yang dipercaya
+    }
+    if (CHAL.test(await page.title())) {
+      throw new Error("Cloudflare challenge tidak selesai di IP ini — set proxy residensial di setting source");
+    }
+    const html = await page.content();
+    const postings = extractJobPostingsFromHtml(html);
+    if (postings.length === 0) throw new Error("halaman terbuka via browser tapi tidak ada JSON-LD JobPosting");
+    return postings.map(mapJobStreetJob).filter((r): r is RawJobRecord => r !== null);
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+}
+
+/** Real HTTP probe dengan profil engine + network config source (proxy/headers) — dipakai untuk source yang belum punya
  *  parser integrasi. Tiap engine di chain mencoba menjangkau site secara nyata
  *  (browser engine pakai UA browser, HTTP engine pakai UA bot), jadi laporan
  *  failover chain adalah hasil pengukuran sungguhan, bukan theater. */
 async function probeWithEngine(
   url: string,
   engine: EngineKey,
+  cfg: SourceNetConfig = {},
   timeoutMs = 6_000
 ): Promise<{ ok: boolean; httpStatus?: number; error?: string; durationMs: number }> {
   const t0 = Date.now();
-  const browserUa =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
   try {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(timeoutMs),
-      redirect: "follow",
-      headers: {
-        "User-Agent": ENGINES[engine].kind === "browser" ? browserUa : UA,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-      cache: "no-store",
+    const res = await sourceFetchText(url, cfg, {
+      ua: ENGINES[engine].kind === "browser" ? "browser" : "bot",
+      timeoutMs,
     });
-    await res.arrayBuffer().catch(() => undefined); // drain body — socket close rapi
     return {
       ok: res.ok,
       httpStatus: res.status,
@@ -112,35 +165,35 @@ const BOARD_SEARCHES: BoardSearch[] = [
   {
     slug: "remotive",
     name: "Remotive",
-    search: async (words, rawQuery) => {
-      const data = (await getJson(`https://remotive.com/api/remote-jobs?search=${encodeURIComponent(rawQuery)}&limit=60`)) as { jobs?: Record<string, unknown>[] };
+    search: async (words, rawQuery, ctx) => {
+      const data = (await getJson(`https://remotive.com/api/remote-jobs?search=${encodeURIComponent(rawQuery)}&limit=60`, ctx)) as { jobs?: Record<string, unknown>[] };
       return (data.jobs ?? []).map(mapRemotiveJob).filter((r): r is RawJobRecord => r !== null && matchesKeyword(r, words));
     },
   },
   {
     slug: "jobicy",
     name: "Jobicy",
-    search: async (words, rawQuery) => {
-      const data = (await getJson(`https://jobicy.com/api/v2/remote-jobs?count=60&tag=${encodeURIComponent(rawQuery)}`)) as { jobs?: Record<string, unknown>[] };
+    search: async (words, rawQuery, ctx) => {
+      const data = (await getJson(`https://jobicy.com/api/v2/remote-jobs?count=60&tag=${encodeURIComponent(rawQuery)}`, ctx)) as { jobs?: Record<string, unknown>[] };
       return (data.jobs ?? []).map(mapJobicyJob).filter((r): r is RawJobRecord => r !== null && matchesKeyword(r, words));
     },
   },
   {
     slug: "arbeitnow",
     name: "Arbeitnow",
-    search: async (words) => {
-      const data = (await getJson("https://www.arbeitnow.com/api/job-board-api")) as { data?: Record<string, unknown>[] };
+    search: async (words, _rawQuery, ctx) => {
+      const data = (await getJson("https://www.arbeitnow.com/api/job-board-api", ctx)) as { data?: Record<string, unknown>[] };
       return (data.data ?? []).map(mapArbeitnowJob).filter((r): r is RawJobRecord => r !== null && matchesKeyword(r, words));
     },
   },
   {
     slug: "remoteok",
     name: "RemoteOK",
-    search: async (words) => {
+    search: async (words, _rawQuery, ctx) => {
       // RemoteOK tags are single tokens — try each keyword word until a tag hits
       let list: unknown[] = [];
       for (const w of words.slice(0, 2)) {
-        const data = (await getJson(`https://remoteok.com/api?tag=${encodeURIComponent(w)}`)) as unknown;
+        const data = (await getJson(`https://remoteok.com/api?tag=${encodeURIComponent(w)}`, ctx)) as unknown;
         list = Array.isArray(data) ? data : [];
         if (list.some((x) => x && typeof x === "object" && (x as Record<string, unknown>).position)) break;
       }
@@ -153,9 +206,35 @@ const BOARD_SEARCHES: BoardSearch[] = [
   {
     slug: "himalayas",
     name: "Himalayas",
-    search: async (words) => {
-      const data = (await getJson("https://himalayas.app/jobs/api?limit=100")) as { jobs?: Record<string, unknown>[] };
+    search: async (words, _rawQuery, ctx) => {
+      const data = (await getJson("https://himalayas.app/jobs/api?limit=100", ctx)) as { jobs?: Record<string, unknown>[] };
       return (data.jobs ?? []).map(mapHimalayasJob).filter((r): r is RawJobRecord => r !== null && matchesKeyword(r, words));
+    },
+  },
+  {
+    slug: "jobstreet",
+    name: "JobStreet",
+    // SEO listing page (id.jobstreet.com/id/{query}-jobs) with schema.org
+    // JSON-LD JobPosting blocks. HTTP engines fetch it directly — works
+    // when the source has a residential proxy; 403 → failover. The
+    // Playwright attempt launches a REAL Chromium (proxy-aware) and can
+    // complete the Cloudflare challenge on a trusted exit IP.
+    search: async (words, rawQuery, ctx) => {
+      const url = jobStreetSearchUrl(rawQuery);
+      if (ctx.engine === "playwright") {
+        return searchJobStreetBrowser(url, ctx);
+      }
+      if (ENGINES[ctx.engine].kind === "browser") {
+        // puppeteer / selenium — no driver on this host; honest fast-fail, no theater
+        throw new Error(`driver ${ENGINES[ctx.engine].name} tidak tersedia di host ini — pakai Playwright atau HTTP engine + proxy`);
+      }
+      const { ok, status, text } = await sourceFetchText(url, ctx, { ua: "browser", timeoutMs: 12_000 });
+      if (!ok) {
+        throw new Error(`HTTP ${status}${status === 403 ? " — Cloudflare challenge (set proxy residensial / pakai engine Playwright)" : ""}`);
+      }
+      const postings = extractJobPostingsFromHtml(text);
+      if (postings.length === 0) throw new Error("halaman terbuka tapi tidak ada JSON-LD JobPosting (kemungkinan masih di challenge)");
+      return postings.map(mapJobStreetJob).filter((r): r is RawJobRecord => r !== null && matchesKeyword(r, words));
     },
   },
 ];
@@ -276,7 +355,7 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
   const sources = await db.source.findMany({
     where: slugs.length > 0 ? { slug: { in: slugs } } : { status: "ACTIVE" },
     orderBy: { createdAt: "asc" },
-    select: { id: true, slug: true, name: true, engine: true, engines: true, status: true, baseUrl: true },
+    select: { id: true, slug: true, name: true, engine: true, engines: true, status: true, baseUrl: true, proxyUrl: true, headersJson: true },
   });
 
   // Global Engine Pool (§9.2) — dipakai buat interseksi prioritas §9.3
@@ -308,7 +387,11 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
             attempts.push({ engine, status: "failed", durationMs: 0, note: "baseUrl source belum diisi" });
             continue;
           }
-          const probe = await probeWithEngine(/^https?:\/\//i.test(baseUrl) ? baseUrl : `https://${baseUrl}`, engine);
+          const probe = await probeWithEngine(
+            /^https?:\/\//i.test(baseUrl) ? baseUrl : `https://${baseUrl}`,
+            engine,
+            { proxyUrl: source.proxyUrl, headersJson: source.headersJson }
+          );
           attempts.push({
             engine,
             status: probe.ok ? "success" : "failed",
@@ -356,7 +439,7 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
         const engine = chain[i];
         const at0 = Date.now();
         try {
-          records = await boardSearch.search(words, q);
+          records = await boardSearch.search(words, q, { engine, proxyUrl: source.proxyUrl, headersJson: source.headersJson });
           winningEngine = engine;
           lastError = null;
           attempts.push({ engine, status: "success", durationMs: Date.now() - at0, note: `found ${records.length}` });

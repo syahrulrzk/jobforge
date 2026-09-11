@@ -17,12 +17,14 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
   const existing = await db.source.findUnique({ where: { id } });
   if (!existing) return NextResponse.json({ error: "Source not found" }, { status: 404 });
   // §9.3 multi-engine — engines array (urutan = prioritas) disimpan CSV + engine primary
-  const { engines, ...rest } = parsed.data;
+  const { engines, proxyUrl, headersJson, ...rest } = parsed.data;
   const data: Record<string, string> = { ...rest };
   if (engines && engines.length > 0) {
     data.engines = engines.join(",");
     data.engine = engines[0];
   }
+  if (proxyUrl !== undefined) data.proxyUrl = proxyUrl;
+  if (headersJson !== undefined) data.headersJson = headersJson;
   const source = await db.source.update({
     where: { id },
     data: { ...data, status: parsed.data.status === "ACTIVE" ? "ACTIVE" : parsed.data.status },

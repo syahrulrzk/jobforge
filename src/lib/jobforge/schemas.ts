@@ -4,6 +4,32 @@ export const ENGINE_VALUES = ["cheerio", "crawlee", "puppeteer", "playwright", "
 export const TYPE_VALUES = ["JOB_PORTAL", "CAREER_SITE", "PUBLIC_SOURCE"] as const;
 export const SCRAPER_VALUES = ["STATIC", "DYNAMIC", "API"] as const;
 
+/** Proxy opsional per source — kosong = direct. Harus http(s):// (undici ProxyAgent)
+ *  atau socks5:// (browser engine Playwright). */
+const proxyUrlField = z
+  .string()
+  .trim()
+  .refine((v) => v === "" || /^https?:\/\//i.test(v) || /^socks5:\/\//i.test(v), "Proxy harus http(s):// atau socks5://")
+  .optional();
+
+/** Custom HTTP headers (JSON object string) — mis. {"Cookie":"cf_clearance=..."} */
+const headersJsonField = z
+  .string()
+  .trim()
+  .refine(
+    (v) => {
+      if (!v) return true;
+      try {
+        const o: unknown = JSON.parse(v);
+        return !!o && typeof o === "object" && !Array.isArray(o);
+      } catch {
+        return false;
+      }
+    },
+    "Headers harus JSON object valid, mis. {\"Cookie\":\"...\"}"
+  )
+  .optional();
+
 /**
  * Terima nilai tunggal ATAU array dari UI — output CSV string.
  * Kolom DB (type / scraperType / engines) menyimpan CSV untuk multi-select (§9.3).
@@ -23,6 +49,8 @@ export const sourceCreateSchema = z.object({
   // multi-engine per source — urutan array = urutan prioritas failover
   engines: z.array(z.enum(ENGINE_VALUES)).min(1, "Minimal satu engine harus dipilih").optional(),
   engine: z.enum(ENGINE_VALUES).optional(), // backward-compat single engine
+  proxyUrl: proxyUrlField,
+  headersJson: headersJsonField,
 });
 
 export const sourceUpdateSchema = z.object({
@@ -34,4 +62,6 @@ export const sourceUpdateSchema = z.object({
   status: z.enum(["ACTIVE", "INACTIVE", "ERROR"]).optional(),
   engines: z.array(z.enum(ENGINE_VALUES)).min(1, "Minimal satu engine harus dipilih").optional(),
   engine: z.enum(ENGINE_VALUES).optional(),
+  proxyUrl: proxyUrlField,
+  headersJson: headersJsonField,
 });

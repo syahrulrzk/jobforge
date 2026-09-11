@@ -1,47 +1,76 @@
 #!/usr/bin/env python3
-"""Probe menyeluruh JobStreet — bukti definitif kenapa scraper anonim gagal."""
-import json
-import urllib.request
-import urllib.error
+"""Task 16-b — probe real bypass paths for JobStreet (Datadome 403 on main site).
+Tests: (1) main site baseline, (2) SEO listing pages, (3) internal API guesses,
+(4) xapi.seekasia.com (SEEK Asia mobile/web API host), (5) third-party reader
+proxies. Every request is real — no mocks. Output: status + latency + snippet.
+"""
+import requests, time, sys
 
-URLS = [
-    ("root (UA bot)", "https://www.jobstreet.co.id/", "bot"),
-    ("root (UA browser + headers lengkap)", "https://www.jobstreet.co.id/", "browser"),
-    ("root (UA Googlebot)", "https://www.jobstreet.co.id/", "googlebot"),
-    ("listing /id/jobs (UA browser)", "https://www.jobstreet.co.id/id/jobs/frontend-developer", "browser"),
-    ("xapi.jobstreet.co.id (host API Seek)", "https://xapi.jobstreet.co.id/", "browser"),
-    ("sitemap.xml", "https://www.jobstreet.co.id/sitemap.xml", "bot"),
-    ("robots.txt", "https://www.jobstreet.co.id/robots.txt", "bot"),
-]
+requests.packages.urllib3.disable_warnings()
 
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+MOBILE_UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+APP_UA = "okhttp/4.9.3"
 
-def headers_for(kind):
-    if kind == "browser":
-        return {
-            "User-Agent": BROWSER_UA,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
-            "Sec-Ch-Ua": '"Chromium";v="126", "Google Chrome";v="126"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Upgrade-Insecure-Requests": "1",
-        }
-    if kind == "googlebot":
-        return {"User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "Accept": "*/*"}
-    return {"User-Agent": "JobForgeBot/1.0 (+https://jobforge.local)", "Accept": "*/*"}
+def prof_browser():
+    return {
+        "User-Agent": BROWSER_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+        "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none", "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+    }
 
-for label, url, kind in URLS:
-    req = urllib.request.Request(url, headers=headers_for(kind))
+def prof_api():
+    return {
+        "User-Agent": BROWSER_UA,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "id-ID,id;q=0.9,en;q=0.8",
+        "Referer": "https://www.jobstreet.co.id/",
+        "Origin": "https://www.jobstreet.co.id",
+    }
+
+def prof_app():
+    return {"User-Agent": APP_UA, "Accept": "application/json"}
+
+PROFILES = {"browser": prof_browser(), "api": prof_api(), "app": prof_app()}
+
+TARGETS = [
+    # ── main site baseline / SEO pages
+    ("browser", "https://www.jobstreet.co.id/"),
+    ("browser", "https://www.jobstreet.co.id/id/frontend-developer-jobs"),
+    ("browser", "https://www.jobstreet.co.id/job-search?keyword=frontend%20developer"),
+    ("mobile",  "https://www.jobstreet.co.id/id/frontend-developer-jobs"),
+    # ── internal API guesses on main host
+    ("api", "https://www.jobstreet.co.id/api/v1/jobs?keyword=frontend%20developer"),
+    ("api", "https://www.jobstreet.co.id/api/v1/jobsearch/search?keyword=frontend%20developer"),
+    ("api", "https://www.jobstreet.co.id/api/jobsearch/v1/search?keyword=frontend%20developer"),
+    # ── SEEK Asia xapi (mobile app backend)
+    ("app",  "https://xapi.seekasia.com/api/v1/jobsearch/search?keyword=frontend%20developer&country_sites=id&limit=20"),
+    ("app",  "https://xapi.seekasia.com/jobs?keyword=frontend"),
+    ("api",  "https://xapi.seekasia.com/api/v1/jobsearch/search?keyword=frontend%20developer&country_sites=id&limit=20"),
+    # ── third-party reader proxies fetching the SEO listing page
+    ("browser", "https://r.jina.ai/https://www.jobstreet.co.id/id/frontend-developer-jobs"),
+    ("browser", "https://api.allorigins.win/raw?url=" + requests.utils.quote("https://www.jobstreet.co.id/id/frontend-developer-jobs", safe="")),
+]
+
+sniff = sys.argv[1] if len(sys.argv) > 1 else None
+
+for prof, url in TARGETS:
+    if sniff and sniff.lower() not in url.lower():
+        continue
+    t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=8) as r:
-            body = r.read(200)
-            print(f"{label:<42} → {r.status} OK  ({body[:60]!r})")
-    except urllib.error.HTTPError as e:
-        server = e.headers.get("Server", "?")
-        print(f"{label:<42} → {e.code} DIBLOKIR  (server: {server})")
+        r = requests.get(url, headers=PROFILES[prof], timeout=12, verify=True, allow_redirects=True)
+        ms = int((time.time() - t0) * 1000)
+        body = (r.text or "")[:400].replace("\n", " ")[:400]
+        ct = r.headers.get("content-type", "?")
+        server = r.headers.get("server", "?")
+        print(f"[{r.status_code}] {ms:>5}ms prof={prof:<7} ct={ct[:28]:<28} {url[:95]}")
+        print(f"      server={server} | body: {body[:300]}")
     except Exception as e:
-        print(f"{label:<42} → GAGAL: {type(e).__name__}: {str(e)[:60]}")
+        ms = int((time.time() - t0) * 1000)
+        print(f"[ERR] {ms:>5}ms prof={prof:<7} {url[:95]}")
+        print(f"      {type(e).__name__}: {str(e)[:160]}")
+    print()

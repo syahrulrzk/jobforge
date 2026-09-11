@@ -24,6 +24,8 @@ model Source {
   engine      String      @default("cheerio") // primary engine (= engines[0], disimpan utk backward-compat)
   engines     String      @default("") // CSV urutan prioritas engine source, mis. "cheerio,puppeteer,playwright" — kosong = fallback ke engine
   schedule    String      @default("every_6_hours") // hourly | every_6_hours | every_12_hours | daily | manual
+  proxyUrl    String      @default("") // opsional: HTTP(S)/SOCKS proxy per source, mis. http://user:pass@host:port — IP residensial utk bypass anti-bot (Cloudflare/Datadome)
+  headersJson String      @default("") // opsional: custom HTTP headers JSON per source, mis. {"Cookie":"cf_clearance=..."} — dipakai semua engine HTTP + probe
   lastRunAt   DateTime?
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt

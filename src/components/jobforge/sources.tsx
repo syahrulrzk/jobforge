@@ -6,11 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { Cpu, MoreHorizontal, Pencil, Play, Plus, Power, Trash2 } from "lucide-react";
+import { Cpu, Globe, MoreHorizontal, Pencil, Play, Plus, Power, Trash2 } from "lucide-react";
 import { EmptyState, StatusBadge, timeAgo } from "./ui-bits";
 import { useApi } from "@/hooks/use-api";
 import { ENGINES, ENGINE_KEYS, parseEngineList, type EngineKey } from "@/lib/jobforge/engines";
@@ -26,6 +27,8 @@ interface SourceRow {
   engine: string;
   engines: string;
   schedule: string;
+  proxyUrl: string;
+  headersJson: string;
   lastRunAt: string | null;
   jobCount: number;
   runCount: number;
@@ -51,6 +54,8 @@ const EMPTY_FORM = {
   scraperTypes: ["STATIC"],
   schedule: "every_6_hours",
   engines: ["cheerio"] as EngineKey[],
+  proxyUrl: "",
+  headersJson: "",
 };
 
 const TYPE_OPTIONS = [
@@ -144,6 +149,8 @@ export function SourcesView({ live }: { live: boolean }) {
       scraperTypes: (s.scraperType || "STATIC").split(",").map((x) => x.trim()).filter(Boolean),
       schedule: s.schedule,
       engines: parseEngineList(s.engines || s.engine, s.engine),
+      proxyUrl: s.proxyUrl ?? "",
+      headersJson: s.headersJson ?? "",
     });
     setDialogOpen(true);
   };
@@ -171,6 +178,8 @@ export function SourcesView({ live }: { live: boolean }) {
           scraperType: form.scraperTypes,
           schedule: form.schedule,
           engines: form.engines,
+          proxyUrl: form.proxyUrl.trim(),
+          headersJson: form.headersJson.trim(),
         }),
       });
       const json = await res.json();
@@ -319,7 +328,14 @@ export function SourcesView({ live }: { live: boolean }) {
                 sorted.map((s) => (
                   <TableRow key={s.id} className="border-zinc-800/60 hover:bg-zinc-800/30">
                     <TableCell>
-                      <p className="font-medium text-zinc-100">{s.name}</p>
+                      <p className="font-medium text-zinc-100">
+                        {s.name}
+                        {s.proxyUrl && (
+                          <span className="ml-1.5 inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1 py-px align-middle text-[9px] font-semibold text-emerald-300" title="Proxy aktif — traffic source ini keluar via IP proxy">
+                            <Globe className="h-2.5 w-2.5" /> proxy
+                          </span>
+                        )}
+                      </p>
                       <p className="text-[11px] text-zinc-500">{s.baseUrl.replace(/^https?:\/\//, "")} · {s.scraperType.split(",").map((x) => x.trim()).join(" · ")}</p>
                     </TableCell>
                     <TableCell>
@@ -483,6 +499,38 @@ export function SourcesView({ live }: { live: boolean }) {
                 </SelectContent>
               </Select>
             </div>
+
+            {/* Bypass anti-bot — proxy + custom headers per source */}
+            <section className="space-y-2.5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 p-3">
+              <div>
+                <p className="text-[12px] font-semibold text-zinc-300">Bypass Anti-bot (opsional)</p>
+                <p className="mt-0.5 text-[10px] leading-snug text-zinc-600">
+                  Portal yang memblokir IP datacenter (JobStreet/Cloudflare, Datadome) butuh keluaran IP residensial. Semua engine HTTP + probe otomatis lewat proxy ini; engine Playwright ikut me-launch browser via proxy.
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-zinc-400">Proxy URL</Label>
+                <Input
+                  value={form.proxyUrl}
+                  onChange={(e) => setForm({ ...form, proxyUrl: e.target.value })}
+                  placeholder="http://user:pass@host:port atau socks5://host:port"
+                  className="border-zinc-800 bg-zinc-900 font-mono text-[11px]"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs text-zinc-400">Custom Headers (JSON)</Label>
+                <Textarea
+                  value={form.headersJson}
+                  onChange={(e) => setForm({ ...form, headersJson: e.target.value })}
+                  placeholder={'{"Cookie": "cf_clearance=..."}' }
+                  rows={2}
+                  className="border-zinc-800 bg-zinc-900 font-mono text-[11px]"
+                />
+                <p className="text-[10px] text-zinc-600">
+                  Misal cookie cf_clearance hasil login browser — valid kalau JobForge jalan di IP yang sama dengan browser-nya.
+                </p>
+              </div>
+            </section>
           </div>
           <DialogFooter>
             <Button variant="outline" className="border-zinc-800 bg-zinc-900" onClick={() => setDialogOpen(false)}>Batal</Button>

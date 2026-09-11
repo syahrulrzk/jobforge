@@ -30,6 +30,8 @@ export async function GET() {
       engine: s.engine,
       engines: s.engines || s.engine,
       schedule: s.schedule,
+      proxyUrl: s.proxyUrl || "",
+      headersJson: s.headersJson || "",
       lastRunAt: s.lastRunAt,
       jobCount: s._count.jobLinks,
       runCount: s._count.runs,
@@ -75,6 +77,8 @@ export async function POST(req: NextRequest) {
       engine: enginesCsv.split(",")[0],
       engines: enginesCsv,
       schedule: d.schedule,
+      proxyUrl: d.proxyUrl ?? "",
+      headersJson: d.headersJson ?? "",
     },
   });
   return NextResponse.json({ source }, { status: 201 });
