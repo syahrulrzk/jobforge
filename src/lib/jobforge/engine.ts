@@ -323,6 +323,7 @@ async function runScrapeForSource(sourceId: string, forced = false): Promise<voi
 
 async function advanceStageBatches(): Promise<void> {
   const t = Date.now();
+  const st = state();
 
   // SCRAPED → PROCESSING (normalizer)
   const scraped = await db.job.findMany({
@@ -423,14 +424,17 @@ async function advanceStageBatches(): Promise<void> {
   for (const job of enriching) {
     const link = await db.jobSource.findFirst({ where: { jobId: job.id } });
     const rec = parseRawFromJob(job, link?.sourceUrl ?? "");
-    if (job.company && rec.publishedEmail) {
+    // §12 email discovery — payload email first, then scan the description text
+    // (boards often publish a recruitment address inside the posting body)
+    const publishedEmail = rec.publishedEmail ?? extractPublishedEmail(job.description ?? "");
+    if (job.company && publishedEmail) {
       const hasContact = await db.jobContact.findUnique({ where: { jobId: job.id } });
       if (!hasContact) {
-        const v = validateEmail(rec.publishedEmail);
+        const v = validateEmail(publishedEmail);
         await db.jobContact.create({
           data: {
             jobId: job.id,
-            hrEmail: rec.publishedEmail,
+            hrEmail: publishedEmail,
             emailSourceUrl: rec.careerPageUrl,
             emailVerified: v.verified,
             emailStatus: v.status,
@@ -454,6 +458,7 @@ async function advanceStageBatches(): Promise<void> {
     orderBy: { scrapedAt: "asc" },
     include: { company: true, contact: true, jobLinks: { include: { source: true } } },
   });
+  let purgedNoEmail = 0;
   for (const job of validating) {
     const res = validateJob({
       companyName: job.company?.name ?? null,
@@ -466,6 +471,32 @@ async function advanceStageBatches(): Promise<void> {
       sourcePlatform: job.jobLinks[0]?.source.slug ?? null,
       sourceUrl: job.jobLinks[0]?.sourceUrl ?? null,
     });
+    // Email-mandatory rule (§12/§17 spam guard) — a real job whose only blocker
+    // is the HR email must not sit in the DB forever. If the single mailto
+    // discovery attempt already ran (or is impossible), purge the row entirely.
+    const emailMissing = res.missing.some((m) => m.startsWith("HR Email"));
+    const pageUrl = job.jobLinks[0]?.sourceUrl ?? null;
+    if (
+      res.outcome === "NEEDS_ENRICHMENT" &&
+      emailMissing &&
+      job.companyName && // real-source jobs only — legacy mock jobs keep their retry loop
+      (!pageUrl || st.mailtoScanned.has(job.id))
+    ) {
+      const srcId = job.jobLinks[0]?.sourceId ?? "";
+      const lastRun = srcId
+        ? await db.scrapeRun.findFirst({
+            where: { sourceId: srcId, status: { in: ["SUCCESS", "FAILED"] } },
+            orderBy: { startedAt: "desc" },
+          })
+        : null;
+      if (lastRun) {
+        await db.scrapeRun.update({ where: { id: lastRun.id }, data: { jobsRejected: { increment: 1 } } });
+      }
+      await db.job.delete({ where: { id: job.id } });
+      st.mailtoScanned.delete(job.id);
+      purgedNoEmail += 1;
+      continue;
+    }
     await db.job.update({
       where: { id: job.id },
       data: { status: res.outcome, statusReason: res.reason },
@@ -483,17 +514,20 @@ async function advanceStageBatches(): Promise<void> {
       await log("validate", "warning", res.reason, { jobId: job.id });
     }
   }
+  if (purgedNoEmail > 0) {
+    await log("validate", "info", `Email mandatory: ${purgedNoEmail} job tanpa email HR dihapus dari DB (spam guard)`);
+  }
 
   // NEEDS_ENRICHMENT recovery loop — enrichment worker retry (§36)
   // Real-source jobs get priority (they have genuine enrichment to attempt:
   // a live mailto scan of the posting page); mock jobs follow the simulated path.
-  const st = state();
   const needyReal = await db.job.findMany({
     where: { status: "NEEDS_ENRICHMENT", companyName: { not: null }, contact: null },
-    take: 4,
+    take: 8,
     orderBy: { scrapedAt: "asc" },
     include: { company: true, jobLinks: true },
   });
+  let purged = 0;
   const needyMock = await db.job.findMany({
     where: { status: "NEEDS_ENRICHMENT", companyName: null },
     take: 4,
@@ -529,9 +563,18 @@ async function advanceStageBatches(): Promise<void> {
           });
           await log("enrich", "success", `HR email discovered on posting page: ${email}`, { jobId: job.id });
           await db.job.update({ where: { id: job.id }, data: { status: "VALIDATING" } });
+          continue;
         }
       }
     }
+    // Email-mandatory rule — the discovery attempt failed (or was impossible):
+    // a job without an HR email may not stay in the DB (spam guard). Purge it.
+    await db.job.delete({ where: { id: job.id } });
+    st.mailtoScanned.delete(job.id);
+    purged += 1;
+  }
+  if (purged > 0) {
+    await log("validate", "info", `Email mandatory: ${purged} job tanpa email HR dihapus dari DB (spam guard §12)`);
   }
   for (const job of needyMock) {
     const missingLogo = job.company && !job.company.logoUrl;
@@ -652,7 +695,7 @@ export function parseSalaryUsd(text: string): { min: number; max: number; curren
 }
 
 /** §12 real HR email discovery — fetch the posting page and look for a published contact. */
-async function discoverMailto(pageUrl: string): Promise<string | null> {
+export async function discoverMailto(pageUrl: string): Promise<string | null> {
   try {
     const res = await fetch(pageUrl, {
       signal: AbortSignal.timeout(6_000),
@@ -662,13 +705,20 @@ async function discoverMailto(pageUrl: string): Promise<string | null> {
     });
     if (!res.ok) return null;
     const html = (await res.text()).slice(0, 400_000);
-    const mailto = html.match(/mailto:([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/i);
-    if (mailto) return mailto[1].toLowerCase();
-    const named = html.match(/\b((?:hr|careers?|recruitment|talent|jobs?|karir)[A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b/i);
-    return named ? named[1].toLowerCase() : null;
+    return extractPublishedEmail(html);
   } catch {
     return null; // page unreachable — stays NEEDS_ENRICHMENT, honest per §12.4
   }
+}
+
+/** §12 published-email pattern — a mailto: link or an obviously recruitment-prefixed
+ *  address (hr@ / careers@ / recruitment@ / talent@ / jobs@ / karir@). Used both on
+ *  fetched posting pages and on raw posting descriptions. */
+export function extractPublishedEmail(text: string): string | null {
+  const mailto = text.match(/mailto:([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/i);
+  if (mailto) return mailto[1].toLowerCase();
+  const named = text.match(/\b((?:hr|careers?|recruitment|talent|jobs?|karir)[A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b/i);
+  return named ? named[1].toLowerCase() : null;
 }
 
 function getCompanyTemplate(name: string) {
@@ -738,8 +788,13 @@ async function deliverReadyJobs(settings: Map<string, string>): Promise<void> {
   }
 
   // 2. create new deliveries for READY jobs without one
+  // Email-mandatory rule: the portal only ever receives jobs that carry an HR email
   const readyJobs = await db.job.findMany({
-    where: { status: "READY", deliveries: { none: { status: { in: ["PENDING", "SENDING"] } } } },
+    where: {
+      status: "READY",
+      contact: { isNot: null },
+      deliveries: { none: { status: { in: ["PENDING", "SENDING"] } } },
+    },
     take: batchSize,
     orderBy: { scrapedAt: "asc" },
     include: { deliveries: { orderBy: { createdAt: "desc" }, take: 1 } },

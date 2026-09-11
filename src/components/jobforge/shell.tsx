@@ -34,9 +34,9 @@ import {
 } from "lucide-react";
 
 const NAV: { key: ViewKey; label: string; icon: React.ReactNode; group: string }[] = [
-  { key: "search", label: "Cari Lowongan", icon: <Search className="h-4 w-4" />, group: "Karier" },
   { key: "overview", label: "Dashboard", icon: <Gauge className="h-4 w-4" />, group: "Monitoring" },
   { key: "activity", label: "Activity Console", icon: <TerminalSquare className="h-4 w-4" />, group: "Monitoring" },
+  { key: "search", label: "Cari LokerBase", icon: <Search className="h-4 w-4" />, group: "Karier" },
   { key: "jobs", label: "Jobs", icon: <FileText className="h-4 w-4" />, group: "Data" },
   { key: "companies", label: "Companies", icon: <Building2 className="h-4 w-4" />, group: "Data" },
   { key: "contacts", label: "HR Contacts", icon: <Mail className="h-4 w-4" />, group: "Data" },
@@ -49,7 +49,7 @@ const NAV: { key: ViewKey; label: string; icon: React.ReactNode; group: string }
 
 const VIEW_TITLES: Record<ViewKey, { title: string; sub: string }> = {
   overview: { title: "Dashboard", sub: "Ringkasan pipeline — Collect. Enrich. Deliver." },
-  search: { title: "Cari Lowongan", sub: "Temukan posisi yang kamu mau dari hasil scraping live" },
+  search: { title: "Cari LokerBase", sub: "Temukan lowongan dari database & scrape live — wajib ada email HR" },
   activity: { title: "Activity Console", sub: "Log terstruktur lengkap seluruh pipeline — filter, streaming, export" },
   jobs: { title: "Jobs", sub: "Semua lowongan hasil scraping dengan status lifecycle" },
   companies: { title: "Companies", sub: "Perusahaan hasil enrichment dan deduplication" },

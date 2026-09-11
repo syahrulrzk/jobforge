@@ -1,0 +1,858 @@
+     1→     1→import { db } from "@/lib/db";
+     2→     2→import { COMPANY_TEMPLATES, SOURCE_PROFILES, chance, pick, randInt, type SourceProfile } from "./data";
+     3→     3→import { scrapeSource, type RawJobRecord } from "./adapters";
+     4→     4→import {
+     5→     5→  companyFingerprint,
+     6→     6→  jobFingerprint,
+     7→     7→  normalizeTitle,
+     8→     8→  validateEmail,
+     9→     9→  validateJob,
+    10→    10→} from "./pipeline";
+    11→    11→import { processBulkImport, generateRequestId } from "./portal";
+    12→    12→import { DELIVERY_ENDPOINT, SETTING_KEYS, type CanonicalJob } from "./types";
+    13→    13→import { extractDomain, resolveLogoUrl } from "./logo";
+    14→    14→import { ENGINES, engineJitter, parseEnginePool, rotateEngine, type EngineKey } from "./engines";
+    15→    15→import { REAL_BOARDS, realBoardError } from "./sources-real";
+    16→    16→
+    17→    17→// ─────────────────────────────────────────────────────────────
+    18→    18→// JOBFORCE — Worker Engine (PRD §22, §36, §41)
+    19→    19→// Tick-based worker simulation:
+    20→    20→//   scrape → normalize/dedup → enrich → validate → deliver
+    21→    21→// Runs as a process singleton, survives HMR via globalThis.
+    22→    22→// ─────────────────────────────────────────────────────────────
+    23→    23→
+    24→    24→interface EngineState {
+    25→    25→  instance: string;
+    26→    26→  timer: ReturnType<typeof setInterval> | null;
+    27→    27→  ticking: boolean;
+    28→    28→  tickCount: number;
+    29→    29→  settings: Map<string, string>;
+    30→    30→  settingsLoadedAt: number;
+    31→    31→  sourceCursor: number;
+    32→    32→  engineCursor: number;
+    33→    33→  mailtoScanned: Set<string>; // jobIds already scanned for a real mailto contact
+    34→    34→}
+    35→    35→
+    36→    36→const g = globalThis as unknown as { __jobforgeEngine?: EngineState };
+    37→    37→
+    38→    38→// Unique per module evaluation — lets the engine restart cleanly after HMR
+    39→    39→const MODULE_INSTANCE = Math.random().toString(36).slice(2);
+    40→    40→
+    41→    41→function state(): EngineState {
+    42→    42→  if (!g.__jobforgeEngine || g.__jobforgeEngine.instance !== MODULE_INSTANCE) {
+    43→    43→    if (g.__jobforgeEngine?.timer) clearInterval(g.__jobforgeEngine.timer);
+    44→    44→    g.__jobforgeEngine = {
+    45→    45→      instance: MODULE_INSTANCE,
+    46→    46→      timer: null,
+    47→    47→      ticking: false,
+    48→    48→      tickCount: 0,
+    49→    49→      settings: new Map(),
+    50→    50→      settingsLoadedAt: 0,
+    51→    51→      sourceCursor: 0,
+    52→    52→      engineCursor: 0,
+    53→    53→      mailtoScanned: new Set(),
+    54→    54→    };
+    55→    55→  }
+    56→    56→  return g.__jobforgeEngine;
+    57→    57→}
+    58→    58→
+    59→    59→async function getSettings(): Promise<Map<string, string>> {
+    60→    60→  const s = state();
+    61→    61→  if (Date.now() - s.settingsLoadedAt > 15_000 || s.settings.size === 0) {
+    62→    62→    const rows = await db.setting.findMany();
+    63→    63→    s.settings = new Map(rows.map((r) => [r.key, r.value]));
+    64→    64→    s.settingsLoadedAt = Date.now();
+    65→    65→  }
+    66→    66→  return s.settings;
+    67→    67→}
+    68→    68→
+    69→    69→export async function log(
+    70→    70→  action: string,
+    71→    71→  status: string,
+    72→    72→  message: string,
+    73→    73→  opts: { source?: string | null; jobId?: string | null; durationMs?: number } = {}
+    74→    74→) {
+    75→    75→  try {
+    76→    76→    await db.activityLog.create({
+    77→    77→      data: {
+    78→    78→        action,
+    79→    79→        status,
+    80→    80→        message,
+    81→    81→        source: opts.source ?? null,
+    82→    82→        jobId: opts.jobId ?? null,
+    83→    83→        durationMs: opts.durationMs ?? null,
+    84→    84→      },
+    85→    85→    });
+    86→    86→  } catch {
+    87→    87→    // logging must never break the pipeline
+    88→    88→  }
+    89→    89→}
+    90→    90→
+    91→    91→async function recordError(
+    92→    92→  errorType: string,
+    93→    93→  message: string,
+    94→    94→  opts: { sourceId?: string | null; jobId?: string | null } = {}
+    95→    95→) {
+    96→    96→  const existing = await db.scrapeError.findFirst({
+    97→    97→    where: { errorType, message, sourceId: opts.sourceId ?? null, status: "OPEN" },
+    98→    98→  });
+    99→    99→  if (existing) {
+   100→   100→    await db.scrapeError.update({
+   101→   101→      where: { id: existing.id },
+   102→   102→      data: { lastSeen: new Date(), retryCount: { increment: 1 } },
+   103→   103→    });
+   104→   104→  } else {
+   105→   105→    await db.scrapeError.create({
+   106→   106→      data: {
+   107→   107→        errorType,
+   108→   108→        message,
+   109→   109→        sourceId: opts.sourceId ?? null,
+   110→   110→        jobId: opts.jobId ?? null,
+   111→   111→        stack: `at Engine.tick (jobforge/engine.ts)`,
+   112→   112→      },
+   113→   113→    });
+   114→   114→  }
+   115→   115→}
+   116→   116→
+   117→   117→// ─────────────────────────────────────────────────────────────
+   118→   118→// Phase 1 — Scraping (§10, §23, §24)
+   119→   119→// ─────────────────────────────────────────────────────────────
+   120→   120→
+   121→   121→function profileFor(slug: string): SourceProfile {
+   122→   122→  return SOURCE_PROFILES.find((p) => p.slug === slug) ?? SOURCE_PROFILES[0];
+   123→   123→}
+   124→   124→
+   125→   125→async function canonicalFor(jobId: string): Promise<CanonicalJob | null> {
+   126→   126→  const job = await db.job.findUnique({
+   127→   127→    where: { id: jobId },
+   128→   128→    include: { company: true, jobLinks: { include: { source: true } }, contact: true },
+   129→   129→  });
+   130→   130→  if (!job || !job.company || job.jobLinks.length === 0 || !job.contact) return null;
+   131→   131→  const link = job.jobLinks[0];
+   132→   132→  return {
+   133→   133→    source: { platform: link.source.slug, job_id: link.sourceJobId, url: link.sourceUrl },
+   134→   134→    company: {
+   135→   135→      name: job.company.name,
+   136→   136→      logo_url: job.company.logoUrl,
+   137→   137→      website: job.company.website ?? null,
+   138→   138→      profile: job.company.profile,
+   139→   139→    },
+   140→   140→    job: {
+   141→   141→      title: job.title,
+   142→   142→      description: job.description,
+   143→   143→      salary:
+   144→   144→        job.salaryMin && job.salaryMax
+   145→   145→          ? { min: job.salaryMin, max: job.salaryMax, currency: job.currency ?? "IDR" }
+   146→   146→          : null,
+   147→   147→      location: job.location ?? null,
+   148→   148→      employment_type: job.employmentType ?? null,
+   149→   149→      workplace_type: job.workplaceType ?? null,
+   150→   150→      requirements: job.requirements ? JSON.parse(job.requirements) : null,
+   151→   151→      skills: job.skills ? JSON.parse(job.skills) : null,
+   152→   152→    },
+   153→   153→    contact: {
+   154→   154→      hr_email: job.contact.hrEmail,
+   155→   155→      email_source: job.contact.emailSourceUrl ?? null,
+   156→   156→      email_verified: job.contact.emailVerified,
+   157→   157→    },
+   158→   158→    metadata: { scraped_at: job.scrapedAt.toISOString() },
+   159→   159→  };
+   160→   160→}
+   161→   161→
+   162→   162→async function runScrapeForSource(sourceId: string, forced = false): Promise<void> {
+   163→   163→  const source = await db.source.findUnique({ where: { id: sourceId } });
+   164→   164→  if (!source) return;
+   165→   165→  if (!forced && source.status === "INACTIVE") return;
+   166→   166→
+   167→   167→  const settings = await getSettings();
+   168→   168→  const profile = profileFor(source.slug);
+   169→   169→
+   170→   170→  // §9.2 engine pool — source's pinned engine wins when active, else rotate over the pool
+   171→   171→  const pool = parseEnginePool(settings.get(SETTING_KEYS.enginePool));
+   172→   172→  const s = state();
+   173→   173→  const engine: EngineKey = pool.includes(source.engine as EngineKey)
+   174→   174→    ? (source.engine as EngineKey)
+   175→   175→    : rotateEngine(pool, s.engineCursor++).engine;
+   176→   176→
+   177→   177→  // REAL data mode — live public job APIs, throttled for auto runs (be nice to the boards)
+   178→   178→  const realMode = (settings.get(SETTING_KEYS.dataMode) ?? "real") === "real";
+   179→   179→  const realFetcher = REAL_BOARDS[source.slug];
+   180→   180→  if (realMode && realFetcher && !forced) {
+   181→   181→    const elapsed = source.lastRunAt ? Date.now() - source.lastRunAt.getTime() : Infinity;
+   182→   182→    if (elapsed < 120_000) return;
+   183→   183→  }
+   184→   184→
+   185→   185→  const run = await db.scrapeRun.create({
+   186→   186→    data: { sourceId: source.id, engine, status: "RUNNING" },
+   187→   187→  });
+   188→   188→
+   189→   189→  const t0 = Date.now();
+   190→   190→  const engineMeta = ENGINES[engine];
+   191→   191→  const jitter = engineJitter(engine);
+   192→   192→  // engine prep/teardown latency — browser engines boot a driver session (§10.4)
+   193→   193→  await new Promise((resolve) => setTimeout(resolve, jitter.latencyMs));
+   194→   194→
+   195→   195→  let result: { records: RawJobRecord[]; pagesScraped: number; errors: { type: string; message: string }[] };
+   196→   196→  if (jitter.failed) {
+   197→   197→    // engine-level failure roll (driver crash / renderer hang) — exercises the failover path
+   198→   198→    result = { records: [], pagesScraped: 1, errors: [{ type: "NETWORK_ERROR", message: `${engineMeta.name} engine: session crashed mid-run, failover queued` }] };
+   199→   199→  } else if (realMode && realFetcher) {
+   200→   200→    try {
+   201→   201→      result = await realFetcher();
+   202→   202→    } catch (err) {
+   203→   203→      const e = realBoardError(source.name, err);
+   204→   204→      result = { records: [], pagesScraped: 1, errors: [e] };
+   205→   205→    }
+   206→   206→  } else {
+   207→   207→    result = scrapeSource(profile, new Set());
+   208→   208→  }
+   209→   209→
+   210→   210→  let created = 0;
+   211→   211→  let updated = 0;
+   212→   212→  let duplicated = 0;
+   213→   213→
+   214→   214→  for (const rec of result.records) {
+   215→   215→    const fp = jobFingerprint(rec.rawCompanyName ?? "", rec.rawTitle, rec.rawLocation);
+   216→   216→    const existing = await db.job.findUnique({ where: { fingerprint: fp } });
+   217→   217→
+   218→   218→    if (existing) {
+   219→   219→      // §15.1 — duplicate detected: attach source identity, maybe refresh
+   220→   220→      const linkExists = await db.jobSource.findFirst({
+   221→   221→        where: { jobId: existing.id, sourceId: source.id },
+   222→   222→      });
+   223→   223→      if (!linkExists) {
+   224→   224→        await db.jobSource.create({
+   225→   225→          data: {
+   226→   226→            jobId: existing.id,
+   227→   227→            sourceId: source.id,
+   228→   228→            sourceJobId: rec.sourceJobId,
+   229→   229→            sourceUrl: rec.sourceUrl,
+   230→   230→          },
+   231→   231→        });
+   232→   232→      }
+   233→   233→      if (chance(0.55)) {
+   234→   234→        await db.job.update({
+   235→   235→          where: { id: existing.id },
+   236→   236→          data: { scrapedAt: new Date(rec.scrapedAt) },
+   237→   237→        });
+   238→   238→        updated += 1;
+   239→   239→      } else {
+   240→   240→        duplicated += 1;
+   241→   241→      }
+   242→   242→      continue;
+   243→   243→    }
+   244→   244→
+   245→   245→    const newJob = await db.job.create({
+   246→   246→      data: {
+   247→   247→        fingerprint: fp,
+   248→   248→        title: rec.rawTitle.replace(/\s*[-–]\s*PT\s+.*$/i, "").trim() || rec.rawTitle,
+   249→   249→        normalizedTitle: normalizeTitle(rec.rawTitle),
+   250→   250→        companyName: rec.rawCompanyName,
+   251→   251→        companyLogoUrl: rec.rawCompanyLogoUrl,
+   252→   252→        description: rec.rawDescription
+   253→   253→          ? rec.rawSalaryText
+   254→   254→            ? `${rec.rawDescription}\n\nSalary: ${rec.rawSalaryText}`
+   255→   255→            : rec.rawDescription
+   256→   256→          : "",
+   257→   257→        salaryMin: null, // set at normalize stage
+   258→   258→        salaryMax: null,
+   259→   259→        currency: null,
+   260→   260→        location: rec.rawLocation,
+   261→   261→        employmentType: rec.rawEmploymentType,
+   262→   262→        workplaceType: rec.rawWorkplaceType,
+   263→   263→        requirements: JSON.stringify(rec.rawRequirements),
+   264→   264→        skills: JSON.stringify(rec.rawSkills),
+   265→   265→        status: "SCRAPED",
+   266→   266→        scrapedAt: new Date(rec.scrapedAt),
+   267→   267→        companyId: null,
+   268→   268→      },
+   269→   269→    });
+   270→   270→    // §15.2 — store source identity for provenance
+   271→   271→    await db.jobSource.create({
+   272→   272→      data: {
+   273→   273→        jobId: newJob.id,
+   274→   274→        sourceId: source.id,
+   275→   275→        sourceJobId: rec.sourceJobId,
+   276→   276→        sourceUrl: rec.sourceUrl,
+   277→   277→      },
+   278→   278→    });
+   279→   279→    created += 1;
+   280→   280→  }
+   281→   281→
+   282→   282→  const failed = result.errors.length > 0 && result.records.length === 0;
+   283→   283→  for (const err of result.errors) {
+   284→   284→    await recordError(err.type, err.message, { sourceId: source.id });
+   285→   285→    await log("error", "failed", `${err.type}: ${err.message}`, { source: source.slug });
+   286→   286→  }
+   287→   287→
+   288→   288→  await db.scrapeRun.update({
+   289→   289→    where: { id: run.id },
+   290→   290→    data: {
+   291→   291→      finishedAt: new Date(),
+   292→   292→      pagesScraped: result.pagesScraped,
+   293→   293→      jobsFound: result.records.length,
+   294→   294→      jobsCreated: created,
+   295→   295→      jobsUpdated: updated,
+   296→   296→      jobsDuplicate: duplicated,
+   297→   297→      errorCount: result.errors.length,
+   298→   298→      status: failed ? "FAILED" : "SUCCESS",
+   299→   299→    },
+   300→   300→  });
+   301→   301→
+   302→   302→  await db.source.update({
+   303→   303→    where: { id: source.id },
+   304→   304→    data: {
+   305→   305→      lastRunAt: new Date(),
+   306→   306→      status: failed ? "ERROR" : "ACTIVE",
+   307→   307→    },
+   308→   308→  });
+   309→   309→
+   310→   310→  await log(
+   311→   311→    "scrape",
+   312→   312→    failed ? "failed" : "success",
+   313→   313→    `Scrape run ${failed ? "failed" : "finished"} via ${engineMeta.name} engine — found ${result.records.length}, created ${created}, updated ${updated}, duplicate ${duplicated}`,
+   314→   314→    { source: source.slug, durationMs: Date.now() - t0 }
+   315→   315→  );
+   316→   316→}
+   317→   317→
+   318→   318→// ─────────────────────────────────────────────────────────────
+   319→   319→// Phase 2 — Pipeline stages (§14 normalizer, §11 enrichment,
+   320→   320→// §12 email discovery, §17 validation)
+   321→   321→// ─────────────────────────────────────────────────────────────
+   322→   322→
+   323→   323→
+   324→   324→async function advanceStageBatches(): Promise<void> {
+   325→   325→  const t = Date.now();
+   326→   326→
+   327→   327→  // SCRAPED → PROCESSING (normalizer)
+   328→   328→  const scraped = await db.job.findMany({
+   329→   329→    where: { status: "SCRAPED" },
+   330→   330→    take: 24,
+   331→   331→    orderBy: { scrapedAt: "asc" },
+   332→   332→    include: { jobLinks: { include: { source: true } } },
+   333→   333→  });
+   334→   334→  for (const job of scraped) {
+   335→   335→    // §14 — normalize salary: structured USD/EUR text first, then legacy IDR pattern
+   336→   336→    const usd = parseSalaryUsd(job.description);
+   337→   337→    const salaryMatch = usd ? null : job.description.match(/IDR\s*([\d.,]+\s*(?:jt|juta)?)/i);
+   338→   338→    let salaryMin: number | null = null;
+   339→   339→    let salaryMax: number | null = null;
+   340→   340→    let currency: string | null = null;
+   341→   341→    if (usd) {
+   342→   342→      salaryMin = usd.min;
+   343→   343→      salaryMax = usd.max;
+   344→   344→      currency = usd.currency;
+   345→   345→    } else if (salaryMatch) {
+   346→   346→      const n = parseFloat(salaryMatch[1].replace(/\./g, "").replace(/,/g, "."));
+   347→   347→      const val = /jt|juta/i.test(salaryMatch[1]) ? Math.round(n * 1_000_000) : Math.round(n);
+   348→   348→      if (val > 0) {
+   349→   349→        salaryMin = val;
+   350→   350→        salaryMax = Math.round(val * 1.35);
+   351→   351→        currency = "IDR";
+   352→   352→      }
+   353→   353→    }
+   354→   354→    await db.job.update({
+   355→   355→      where: { id: job.id },
+   356→   356→      data: {
+   357→   357→        status: "PROCESSING",
+   358→   358→        statusReason: null,
+   359→   359→        ...(salaryMin ? { salaryMin, salaryMax, currency } : {}),
+   360→   360→      },
+   361→   361→    });
+   362→   362→  }
+   363→   363→  if (scraped.length > 0) {
+   364→   364→    await log("normalize", "success", `Normalized ${scraped.length} job record(s) to canonical format`);
+   365→   365→  }
+   366→   366→
+   367→   367→  // PROCESSING → ENRICHING (company enrichment §11)
+   368→   368→  const processing = await db.job.findMany({
+   369→   369→    where: { status: "PROCESSING" },
+   370→   370→    take: 18,
+   371→   371→    orderBy: { scrapedAt: "asc" },
+   372→   372→  });
+   373→   373→  for (const job of processing) {
+   374→   374→    const link = await db.jobSource.findFirst({ where: { jobId: job.id }, include: { source: true } });
+   375→   375→    const rec = parseRawFromJob(job, link?.sourceUrl ?? "");
+   376→   376→    // company upsert by normalized name (§15.3)
+   377→   377→    let company = rec.companyName
+   378→   378→      ? await db.company.findUnique({ where: { normalizedName: companyFingerprint(rec.companyName) } })
+   379→   379→      : null;
+   380→   380→    if (!company && rec.companyName) {
+   381→   381→      // §11 enrichment — logo: provider-resolved PNG link first, raw source logo as backup
+   382→   382→      const resolvedLogo = resolveLogoUrl(rec.companyWebsite) ?? rec.companyLogoUrl ?? "";
+   383→   383→      company = await db.company.create({
+   384→   384→        data: {
+   385→   385→          name: rec.companyName,
+   386→   386→          normalizedName: companyFingerprint(rec.companyName),
+   387→   387→          logoUrl: resolvedLogo,
+   388→   388→          website: rec.companyWebsite,
+   389→   389→          profile: rec.companyProfile ?? "Profil perusahaan belum tersedia.",
+   390→   390→          industry: null,
+   391→   391→        },
+   392→   392→      });
+   393→   393→      await log("enrich", "info", `New company registered: ${company.name}${resolvedLogo ? " — logo resolved" : ""}`);
+   394→   394→    }
+   395→   395→    // §11 enrichment — attempt logo/profile recovery from company website
+   396→   396→    if (company) {
+   397→   397→      const resolvedLogo = resolveLogoUrl(company.website ?? rec.companyWebsite);
+   398→   398→      if ((!company.logoUrl || company.logoUrl.endsWith("/assets/logo.png")) && resolvedLogo) {
+   399→   399→        await db.company.update({ where: { id: company.id }, data: { logoUrl: resolvedLogo, enrichedAt: new Date() } });
+   400→   400→        company = { ...company, logoUrl: resolvedLogo };
+   401→   401→        await log("enrich", "success", `Logo resolved via provider chain for ${company.name} (${extractDomain(company.website) ?? "?"})`);
+   402→   402→      } else if (!company.logoUrl && rec.companyLogoUrl) {
+   403→   403→        await db.company.update({ where: { id: company.id }, data: { logoUrl: rec.companyLogoUrl, enrichedAt: new Date() } });
+   404→   404→        company = { ...company, logoUrl: rec.companyLogoUrl };
+   405→   405→      }
+   406→   406→      if (!company.profile && rec.companyProfile) {
+   407→   407→        await db.company.update({ where: { id: company.id }, data: { profile: rec.companyProfile, enrichedAt: new Date() } });
+   408→   408→      }
+   409→   409→    }
+   410→   410→    await db.job.update({
+   411→   411→      where: { id: job.id },
+   412→   412→      data: { status: "ENRICHING", companyId: company?.id ?? null },
+   413→   413→    });
+   414→   414→  }
+   415→   415→
+   416→   416→  // ENRICHING → VALIDATING (HR email discovery §12)
+   417→   417→  const enriching = await db.job.findMany({
+   418→   418→    where: { status: "ENRICHING" },
+   419→   419→    take: 18,
+   420→   420→    orderBy: { scrapedAt: "asc" },
+   421→   421→    include: { company: true },
+   422→   422→  });
+   423→   423→  for (const job of enriching) {
+   424→   424→    const link = await db.jobSource.findFirst({ where: { jobId: job.id } });
+   425→   425→    const rec = parseRawFromJob(job, link?.sourceUrl ?? "");
+   426→   426→    if (job.company && rec.publishedEmail) {
+   427→   427→      const hasContact = await db.jobContact.findUnique({ where: { jobId: job.id } });
+   428→   428→      if (!hasContact) {
+   429→   429→        const v = validateEmail(rec.publishedEmail);
+   430→   430→        await db.jobContact.create({
+   431→   431→          data: {
+   432→   432→            jobId: job.id,
+   433→   433→            hrEmail: rec.publishedEmail,
+   434→   434→            emailSourceUrl: rec.careerPageUrl,
+   435→   435→            emailVerified: v.verified,
+   436→   436→            emailStatus: v.status,
+   437→   437→          },
+   438→   438→        });
+   439→   439→        if (!v.verified) {
+   440→   440→          await recordError(v.reason.split(":")[0] ?? "EMAIL_INVALID", v.reason, { jobId: job.id });
+   441→   441→        }
+   442→   442→      }
+   443→   443→    } else if (job.company) {
+   444→   444→      // §13 — email not found: needs enrichment, never guess (§12.4)
+   445→   445→      await recordError("EMAIL_NOT_FOUND", `No published recruitment email found on ${rec.careerPageUrl ?? "career page"}`, { jobId: job.id });
+   446→   446→    }
+   447→   447→    await db.job.update({ where: { id: job.id }, data: { status: "VALIDATING" } });
+   448→   448→  }
+   449→   449→
+   450→   450→  // VALIDATING → READY | NEEDS_ENRICHMENT | REJECTED (§17)
+   451→   451→  const validating = await db.job.findMany({
+   452→   452→    where: { status: "VALIDATING" },
+   453→   453→    take: 18,
+   454→   454→    orderBy: { scrapedAt: "asc" },
+   455→   455→    include: { company: true, contact: true, jobLinks: { include: { source: true } } },
+   456→   456→  });
+   457→   457→  for (const job of validating) {
+   458→   458→    const res = validateJob({
+   459→   459→      companyName: job.company?.name ?? null,
+   460→   460→      companyLogoUrl: job.company?.logoUrl || null,
+   461→   461→      companyProfile: job.company?.profile || null,
+   462→   462→      title: job.title,
+   463→   463→      description: job.description,
+   464→   464→      hrEmail: job.contact?.hrEmail ?? null,
+   465→   465→      emailStatus: (job.contact?.emailStatus as "VALID" | "INVALID" | "UNKNOWN") ?? null,
+   466→   466→      sourcePlatform: job.jobLinks[0]?.source.slug ?? null,
+   467→   467→      sourceUrl: job.jobLinks[0]?.sourceUrl ?? null,
+   468→   468→    });
+   469→   469→    await db.job.update({
+   470→   470→      where: { id: job.id },
+   471→   471→      data: { status: res.outcome, statusReason: res.reason },
+   472→   472→    });
+   473→   473→    if (res.outcome === "REJECTED") {
+   474→   474→      const lastRun = await db.scrapeRun.findFirst({
+   475→   475→        where: { sourceId: job.jobLinks[0]?.sourceId ?? "", status: { in: ["SUCCESS", "FAILED"] } },
+   476→   476→        orderBy: { startedAt: "desc" },
+   477→   477→      });
+   478→   478→      if (lastRun) {
+   479→   479→        await db.scrapeRun.update({ where: { id: lastRun.id }, data: { jobsRejected: { increment: 1 } } });
+   480→   480→      }
+   481→   481→      await log("validate", "warning", res.reason, { jobId: job.id });
+   482→   482→    } else if (res.outcome === "NEEDS_ENRICHMENT") {
+   483→   483→      await log("validate", "warning", res.reason, { jobId: job.id });
+   484→   484→    }
+   485→   485→  }
+   486→   486→
+   487→   487→  // NEEDS_ENRICHMENT recovery loop — enrichment worker retry (§36)
+   488→   488→  // Real-source jobs get priority (they have genuine enrichment to attempt:
+   489→   489→  // a live mailto scan of the posting page); mock jobs follow the simulated path.
+   490→   490→  const st = state();
+   491→   491→  const needyReal = await db.job.findMany({
+   492→   492→    where: { status: "NEEDS_ENRICHMENT", companyName: { not: null }, contact: null },
+   493→   493→    take: 4,
+   494→   494→    orderBy: { scrapedAt: "asc" },
+   495→   495→    include: { company: true, jobLinks: true },
+   496→   496→  });
+   497→   497→  const needyMock = await db.job.findMany({
+   498→   498→    where: { status: "NEEDS_ENRICHMENT", companyName: null },
+   499→   499→    take: 4,
+   500→   500→    orderBy: { scrapedAt: "asc" },
+   501→   501→    include: { company: true, contact: true },
+   502→   502→  });
+   503→   503→  for (const job of needyReal) {
+   504→   504→    const pageUrl = job.jobLinks[0]?.sourceUrl;
+   505→   505→    const missingLogo = job.company && !job.company.logoUrl;
+   506→   506→    if (missingLogo && job.company) {
+   507→   507→      // logo recovery — real payload logo lands with the company at enrich time;
+   508→   508→      // for logo-less boards fall back to the job's own payload logo
+   509→   509→      const recovered = resolveLogoUrl(job.company.website) ?? job.companyLogoUrl ?? null;
+   510→   510→      if (recovered) {
+   511→   511→        await db.company.update({
+   512→   512→          where: { id: job.company.id },
+   513→   513→          data: { logoUrl: recovered, enrichedAt: new Date() },
+   514→   514→        });
+   515→   515→        await log("enrich", "success", `Logo recovered for ${job.company.name} — re-validating job`, { jobId: job.id });
+   516→   516→        await db.job.update({ where: { id: job.id }, data: { status: "VALIDATING" } });
+   517→   517→      }
+   518→   518→    }
+   519→   519→    if (pageUrl && !st.mailtoScanned.has(job.id)) {
+   520→   520→      // §12 real enrichment — scan the actual posting page for a published mailto
+   521→   521→      // (one attempt per job per process, rate-limited to respect the boards)
+   522→   522→      st.mailtoScanned.add(job.id);
+   523→   523→      const email = await discoverMailto(pageUrl);
+   524→   524→      if (email) {
+   525→   525→        const v = validateEmail(email);
+   526→   526→        if (v.status !== "INVALID") {
+   527→   527→          await db.jobContact.create({
+   528→   528→            data: { jobId: job.id, hrEmail: email, emailSourceUrl: pageUrl, emailVerified: v.verified, emailStatus: v.status },
+   529→   529→          });
+   530→   530→          await log("enrich", "success", `HR email discovered on posting page: ${email}`, { jobId: job.id });
+   531→   531→          await db.job.update({ where: { id: job.id }, data: { status: "VALIDATING" } });
+   532→   532→        }
+   533→   533→      }
+   534→   534→    }
+   535→   535→  }
+   536→   536→  for (const job of needyMock) {
+   537→   537→    const missingLogo = job.company && !job.company.logoUrl;
+   538→   538→    const missingEmail = !job.contact;
+   539→   539→    if (missingLogo && chance(0.4) && job.company) {
+   540→   540→      // logo recovery via provider chain (Google → DuckDuckGo) dari domain website
+   541→   541→      const recovered = resolveLogoUrl(job.company.website);
+   542→   542→      if (recovered) {
+   543→   543→        await db.company.update({
+   544→   544→          where: { id: job.company.id },
+   545→   545→          data: { logoUrl: recovered, enrichedAt: new Date() },
+   546→   546→        });
+   547→   547→        await log("enrich", "success", `Logo recovered via ${extractDomain(job.company.website) ?? "provider"} for ${job.company.name} — re-validating job`, { jobId: job.id });
+   548→   548→        await db.job.update({ where: { id: job.id }, data: { status: "VALIDATING" } });
+   549→   549→      }
+   550→   550→    }
+   551→   551→    if (missingEmail && job.company && job.company.website) {
+   552→   552→      // legacy mock sources — template-backed simulated career-page discovery
+   553→   553→      if (chance(0.25)) {
+   554→   554→        const email = `hr@${job.company.website.replace(/^https?:\/\/(www\.)?/, "")}`;
+   555→   555→        const v = validateEmail(email);
+   556→   556→        if (v.status === "VALID") {
+   557→   557→          await db.jobContact.create({
+   558→   558→            data: { jobId: job.id, hrEmail: email, emailSourceUrl: `${job.company.website}/career`, emailVerified: true, emailStatus: "VALID" },
+   559→   559→          });
+   560→   560→          await log("enrich", "success", `HR email discovered via career page: ${email}`, { jobId: job.id });
+   561→   561→          await db.job.update({ where: { id: job.id }, data: { status: "VALIDATING" } });
+   562→   562→        }
+   563→   563→      }
+   564→   564→    }
+   565→   565→  }
+   566→   566→
+   567→   567→  // SENT → PUBLISHED (portal confirms publish async)
+   568→   568→  const sentJobs = await db.job.findMany({
+   569→   569→    where: { status: "SENT", scrapedAt: { lt: new Date(t - 4_000) } },
+   570→   570→    take: 20,
+   571→   571→  });
+   572→   572→  for (const job of sentJobs) {
+   573→   573→    await db.job.update({
+   574→   574→      where: { id: job.id },
+   575→   575→      data: { status: "PUBLISHED", publishedAt: new Date() },
+   576→   576→    });
+   577→   577→  }
+   578→   578→  if (sentJobs.length > 0) {
+   579→   579→    await log("import", "success", `${sentJobs.length} job(s) published to Job Portal`);
+   580→   580→  }
+   581→   581→}
+   582→   582→
+   583→   583→// Raw-record reconstruction from stored job (parser output replay §13/§11)
+   584→   584→function parseRawFromJob(
+   585→   585→  job: { title: string; description: string; employmentType: string | null; workplaceType: string | null; companyName?: string | null; companyLogoUrl?: string | null },
+   586→   586→  sourceUrl: string
+   587→   587→): {
+   588→   588→  companyName: string | null;
+   589→   589→  companyLogoUrl: string | null;
+   590→   590→  companyWebsite: string | null;
+   591→   591→  companyProfile: string | null;
+   592→   592→  publishedEmail: string | null;
+   593→   593→  careerPageUrl: string | null;
+   594→   594→} {
+   595→   595→  // Real-source jobs carry the company name + logo straight from the source
+   596→   596→  // payload (§15 provenance). No public template → no guessed email (§12.4);
+   597→   597→  // the recovery worker scans the posting page for a real mailto: contact.
+   598→   598→  if (job.companyName) {
+   599→   599→    const tpl = getCompanyTemplate(job.companyName); // matches only legacy mock companies
+   600→   600→    if (!tpl) {
+   601→   601→      return {
+   602→   602→        companyName: job.companyName,
+   603→   603→        companyLogoUrl: job.companyLogoUrl ?? null,
+   604→   604→        companyWebsite: null,
+   605→   605→        companyProfile: null,
+   606→   606→        publishedEmail: null,
+   607→   607→        careerPageUrl: sourceUrl || null,
+   608→   608→      };
+   609→   609→    }
+   610→   610→    return {
+   611→   611→      companyName: job.companyName,
+   612→   612→      companyLogoUrl: job.companyLogoUrl ?? `${tpl.website}/assets/logo.png`,
+   613→   613→      companyWebsite: tpl.website,
+   614→   614→      companyProfile: tpl.profile,
+   615→   615→      publishedEmail: tpl.noPublicEmail ? null : `${tpl.emailLocal ?? "hr"}@${tpl.website.replace(/^https?:\/\/(www\.)?/, "")}`,
+   616→   616→      careerPageUrl: `${tpl.website}/career`,
+   617→   617→    };
+   618→   618→  }
+   619→   619→  // Legacy mock jobs — company denormalized into the description header line
+   620→   620→  const header = job.description.split("\n")[0] ?? "";
+   621→   621→  const m = header.match(/(.+?)\s+sedang mencari/);
+   622→   622→  const companyName = m ? m[1] : null;
+   623→   623→  const tpl = companyName ? getCompanyTemplate(companyName) : null;
+   624→   624→  return {
+   625→   625→    companyName,
+   626→   626→    companyLogoUrl: tpl ? `${tpl.website}/assets/logo.png` : null,
+   627→   627→    companyWebsite: tpl?.website ?? null,
+   628→   628→    companyProfile: tpl?.profile ?? null,
+   629→   629→    publishedEmail:
+   630→   630→      tpl && !tpl.noPublicEmail
+   631→   631→        ? `${tpl.emailLocal ?? "hr"}@${tpl.website.replace(/^https?:\/\/(www\.)?/, "")}`
+   632→   632→        : null,
+   633→   633→    careerPageUrl: tpl ? `${tpl.website}/career` : null,
+   634→   634→  };
+   635→   635→}
+   636→   636→
+   637→   637→/** §14 salary parser for international boards — "USD 180,000 - 190,000", "$25k - $35k", "€60k-80k". */
+   638→   638→export function parseSalaryUsd(text: string): { min: number; max: number; currency: string } | null {
+   639→   639→  const m = text.match(/(?:USD|[$€])\s?([\d.,]+)\s?([kKmM]?)\s?(?:-|–|—|to)\s?(?:USD\s?)?[$€]?\s?([\d.,]+)\s?([kKmM]?)/);
+   640→   640→  if (!m) return null;
+   641→   641→  const val = (v: string, u: string): number => {
+   642→   642→    const n = parseFloat(v.replace(/,/g, ""));
+   643→   643→    if (!Number.isFinite(n)) return 0;
+   644→   644→    if (u === "k" || u === "K") return Math.round(n * 1_000);
+   645→   645→    if (u === "m" || u === "M") return Math.round(n * 1_000_000);
+   646→   646→    return Math.round(n);
+   647→   647→  };
+   648→   648→  const min = val(m[1], m[2]);
+   649→   649→  const max = val(m[3], m[4]);
+   650→   650→  if (min > 0 && max >= min) return { min, max, currency: m[0].includes("€") ? "EUR" : "USD" };
+   651→   651→  return null;
+   652→   652→}
+   653→   653→
+   654→   654→/** §12 real HR email discovery — fetch the posting page and look for a published contact. */
+   655→   655→async function discoverMailto(pageUrl: string): Promise<string | null> {
+   656→   656→  try {
+   657→   657→    const res = await fetch(pageUrl, {
+   658→   658→      signal: AbortSignal.timeout(6_000),
+   659→   659→      redirect: "follow",
+   660→   660→      headers: { "User-Agent": "JobForgeBot/1.0 (+HR email discovery §12)", Accept: "text/html" },
+   661→   661→      cache: "no-store",
+   662→   662→    });
+   663→   663→    if (!res.ok) return null;
+   664→   664→    const html = (await res.text()).slice(0, 400_000);
+   665→   665→    const mailto = html.match(/mailto:([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/i);
+   666→   666→    if (mailto) return mailto[1].toLowerCase();
+   667→   667→    const named = html.match(/\b((?:hr|careers?|recruitment|talent|jobs?|karir)[A-Za-z0-9._%+-]*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b/i);
+   668→   668→    return named ? named[1].toLowerCase() : null;
+   669→   669→  } catch {
+   670→   670→    return null; // page unreachable — stays NEEDS_ENRICHMENT, honest per §12.4
+   671→   671→  }
+   672→   672→}
+   673→   673→
+   674→   674→function getCompanyTemplate(name: string) {
+   675→   675→  return COMPANY_TEMPLATES.find((c) => c.name === name) ?? null;
+   676→   676→}
+   677→   677→
+   678→   678→// ─────────────────────────────────────────────────────────────
+   679→   679→// Phase 3 — API Delivery (§19–§21: bulk import, tracking, retry)
+   680→   680→// ─────────────────────────────────────────────────────────────
+   681→   681→
+   682→   682→async function deliverReadyJobs(settings: Map<string, string>): Promise<void> {
+   683→   683→  const autoDelivery = settings.get(SETTING_KEYS.autoDelivery) !== "false";
+   684→   684→  if (!autoDelivery) return;
+   685→   685→  const batchSize = Math.max(1, parseInt(settings.get(SETTING_KEYS.batchSize) ?? "25", 10) || 25);
+   686→   686→  const maxAttempts = Math.max(1, parseInt(settings.get(SETTING_KEYS.maxAttempts) ?? "3", 10) || 3);
+   687→   687→
+   688→   688→  // 1. advance existing SENDING/PENDING deliveries (incl. retries §21)
+   689→   689→  const inFlight = await db.apiDelivery.findMany({
+   690→   690→    where: { status: { in: ["PENDING", "SENDING"] } },
+   691→   691→    take: 20,
+   692→   692→    include: { job: true },
+   693→   693→  });
+   694→   694→  for (const d of inFlight) {
+   695→   695→    if (d.nextRetryAt && d.nextRetryAt.getTime() > Date.now()) continue;
+   696→   696→    await db.apiDelivery.update({ where: { id: d.id }, data: { status: "SENDING" } });
+   697→   697→    const canonical = await canonicalFor(d.jobId);
+   698→   698→    // simulate transient API failure (§21 retry strategy)
+   699→   699→    const shouldFail = chance(0.07) && d.attempt < maxAttempts;
+   700→   700→    if (!canonical || shouldFail) {
+   701→   701→      const failedFinal = d.attempt >= maxAttempts;
+   702→   702→      const backoffMs = [5_000, 15_000, 45_000][Math.min(d.attempt - 1, 2)];
+   703→   703→      await db.apiDelivery.update({
+   704→   704→        where: { id: d.id },
+   705→   705→        data: {
+   706→   706→          status: failedFinal ? "FAILED" : "PENDING",
+   707→   707→          attempt: failedFinal ? d.attempt : d.attempt + 1,
+   708→   708→          responseCode: shouldFail ? 500 : null,
+   709→   709→          responseBody: shouldFail ? JSON.stringify({ success: false, message: "Internal Server Error" }) : null,
+   710→   710→          nextRetryAt: failedFinal ? null : new Date(Date.now() + backoffMs),
+   711→   711→        },
+   712→   712→      });
+   713→   713→      if (failedFinal) {
+   714→   714→        await recordError("API_ERROR", `Portal import failed after ${maxAttempts} attempts`, { jobId: d.jobId });
+   715→   715→        await log("deliver", "failed", `Delivery ${d.requestId} failed permanently after ${maxAttempts} attempts`, { jobId: d.jobId });
+   716→   716→      } else {
+   717→   717→        await log("deliver", "warning", `Delivery ${d.requestId} attempt ${d.attempt} failed (500) — retry in ${backoffMs / 1000}s`, { jobId: d.jobId });
+   718→   718→      }
+   719→   719→      continue;
+   720→   720→    }
+   721→   721→
+   722→   722→    const payload = { source: canonical.source.platform, scraped_at: canonical.metadata.scraped_at, jobs: [canonical] };
+   723→   723→    const result = await processBulkImport(payload);
+   724→   724→    await db.apiDelivery.update({
+   725→   725→      where: { id: d.id },
+   726→   726→      data: {
+   727→   727→        status: result.success ? "SUCCESS" : "FAILED",
+   728→   728→        responseCode: result.success ? 200 : 422,
+   729→   729→        responseBody: JSON.stringify(result),
+   730→   730→        deliveredAt: result.success ? new Date() : null,
+   731→   731→        nextRetryAt: null,
+   732→   732→      },
+   733→   733→    });
+   734→   734→    if (result.success) {
+   735→   735→      await db.job.update({ where: { id: d.jobId }, data: { status: "SENT", statusReason: null } });
+   736→   736→      await log("deliver", "success", `Import accepted — ${result.data.created} created, ${result.data.updated} updated`, { jobId: d.jobId });
+   737→   737→    }
+   738→   738→  }
+   739→   739→
+   740→   740→  // 2. create new deliveries for READY jobs without one
+   741→   741→  const readyJobs = await db.job.findMany({
+   742→   742→    where: { status: "READY", deliveries: { none: { status: { in: ["PENDING", "SENDING"] } } } },
+   743→   743→    take: batchSize,
+   744→   744→    orderBy: { scrapedAt: "asc" },
+   745→   745→    include: { deliveries: { orderBy: { createdAt: "desc" }, take: 1 } },
+   746→   746→  });
+   747→   747→  for (const job of readyJobs) {
+   748→   748→    const last = job.deliveries[0];
+   749→   749→    if (last && last.status === "FAILED" && last.attempt >= maxAttempts) continue; // needs manual retry
+   750→   750→    await db.apiDelivery.create({
+   751→   751→      data: {
+   752→   752→        jobId: job.id,
+   753→   753→        endpoint: DELIVERY_ENDPOINT,
+   754→   754→        requestId: generateRequestId(),
+   755→   755→        attempt: 1,
+   756→   756→        maxAttempts,
+   757→   757→        status: "PENDING",
+   758→   758→      },
+   759→   759→    });
+   760→   760→  }
+   761→   761→}
+   762→   762→
+   763→   763→// ─────────────────────────────────────────────────────────────
+   764→   764→// Tick orchestration
+   765→   765→// ─────────────────────────────────────────────────────────────
+   766→   766→
+   767→   767→async function tick(): Promise<void> {
+   768→   768→  const s = state();
+   769→   769→  if (s.ticking) return;
+   770→   770→  s.ticking = true;
+   771→   771→  try {
+   772→   772→    const settings = await getSettings();
+   773→   773→    s.tickCount += 1;
+   774→   774→
+   775→   775→    // scrape phase
+   776→   776→    const autoScrape = settings.get(SETTING_KEYS.autoScrape) !== "false";
+   777→   777→    if (autoScrape && s.tickCount % 2 === 1) {
+   778→   778→      const cap = parseInt(settings.get(SETTING_KEYS.demoJobCap) ?? "800", 10) || 800;
+   779→   779→      const total = await db.job.count();
+   780→   780→      if (total < cap) {
+   781→   781→        const sources = await db.source.findMany({ where: { status: "ACTIVE" }, orderBy: { id: "asc" } });
+   782→   782→        if (sources.length > 0) {
+   783→   783→          s.sourceCursor = (s.sourceCursor + 1) % sources.length;
+   784→   784→          await runScrapeForSource(sources[s.sourceCursor].id);
+   785→   785→        }
+   786→   786→      }
+   787→   787→    }
+   788→   788→
+   789→   789→    await advanceStageBatches();
+   790→   790→    await deliverReadyJobs(settings);
+   791→   791→
+   792→   792→    // housekeeping: keep activity log bounded
+   793→   793→    if (s.tickCount % 40 === 0) {
+   794→   794→      const old = await db.activityLog.findMany({ orderBy: { ts: "desc" }, skip: 300, take: 1000, select: { id: true } });
+   795→   795→      if (old.length > 0) {
+   796→   796→        await db.activityLog.deleteMany({ where: { id: { in: old.map((o) => o.id) } } });
+   797→   797→      }
+   798→   798→    }
+   799→   799→  } catch (err) {
+   800→   800→    await recordError("DATABASE_ERROR", `Engine tick error: ${err instanceof Error ? err.message : String(err)}`);
+   801→   801→  } finally {
+   802→   802→    s.ticking = false;
+   803→   803→  }
+   804→   804→}
+   805→   805→
+   806→   806→export function startEngine(): void {
+   807→   807→  const s = state();
+   808→   808→  if (s.timer) return;
+   809→   809→  getSettings()
+   810→   810→    .then((settings) => {
+   811→   811→      const interval = Math.max(2000, parseInt(settings.get(SETTING_KEYS.tickIntervalMs) ?? "5000", 10) || 5000);
+   812→   812→      s.timer = setInterval(() => void tick(), interval);
+   813→   813→      if (typeof s.timer === "object" && "unref" in s.timer) (s.timer as { unref: () => void }).unref();
+   814→   814→      void log("scrape", "info", `Worker engine started — tick every ${interval / 1000}s`);
+   815→   815→    })
+   816→   816→    .catch(() => {
+   817→   817→      // db not ready yet — retry shortly
+   818→   818→      setTimeout(() => {
+   819→   819→        s.timer = null;
+   820→   820→        startEngine();
+   821→   821→      }, 3000);
+   822→   822→    });
+   823→   823→}
+   824→   824→
+   825→   825→export async function ensureEngine(): Promise<void> {
+   826→   826→  startEngine();
+   827→   827→}
+   828→   828→
+   829→   829→// Manual triggers (§8 run manually, §31 dashboard actions)
+   830→   830→export async function runSourceNow(sourceId: string): Promise<void> {
+   831→   831→  await runScrapeForSource(sourceId, true);
+   832→   832→  await advanceStageBatches();
+   833→   833→}
+   834→   834→
+   835→   835→export async function runPipelineNow(): Promise<number> {
+   836→   836→  const sources = await db.source.findMany({ where: { status: "ACTIVE" } });
+   837→   837→  for (const src of sources) {
+   838→   838→    await runScrapeForSource(src.id, true);
+   839→   839→  }
+   840→   840→  await advanceStageBatches();
+   841→   841→  const settings = await getSettings();
+   842→   842→  await deliverReadyJobs(settings);
+   843→   843→  return sources.length;
+   844→   844→}
+   845→   845→
+   846→   846→export async function retryDelivery(deliveryId: string): Promise<void> {
+   847→   847→  await db.apiDelivery.update({
+   848→   848→    where: { id: deliveryId },
+   849→   849→    data: { status: "PENDING", attempt: 1, nextRetryAt: null, responseCode: null, responseBody: null },
+   850→   850→  });
+   851→   851→  await log("deliver", "info", `Manual retry queued for delivery ${deliveryId}`);
+   852→   852→}
+   853→   853→
+   854→   854→export async function resolveError(errorId: string): Promise<void> {
+   855→   855→  await db.scrapeError.update({ where: { id: errorId }, data: { status: "RESOLVED" } });
+   856→   856→  await log("error", "success", `Error ${errorId} marked as resolved`);
+   857→   857→}
+   858→   858→

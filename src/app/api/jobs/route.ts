@@ -18,8 +18,10 @@ export async function GET(req: NextRequest) {
   const status = sp.get("status") ?? "";
   const company = sp.get("company") ?? "";
   const date = sp.get("date") ?? ""; // 24h | 7d | 30d | all
+  const withEmail = sp.get("withEmail") === "1"; // LokerBase mode — only jobs carrying an HR email
 
   const where: Record<string, unknown> = {};
+  if (withEmail) where.contact = { isNot: null };
   if (q) {
     where.OR = [
       { title: { contains: q } },
