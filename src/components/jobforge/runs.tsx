@@ -112,7 +112,7 @@ export function RunsView({ live }: { live: boolean }) {
                   <TableRow key={r.id} className="border-zinc-800/60 hover:bg-zinc-800/30">
                     <TableCell>
                       <p className="font-medium text-zinc-100">{r.source.name}</p>
-                      <p className="text-[11px] text-zinc-500">{r.source.scraperType}</p>
+                      <p className="text-[11px] text-zinc-500">{r.source.scraperType.split(",").map((x) => x.trim()).join(" · ")}</p>
                     </TableCell>
                     <TableCell>
                       {r.engine && ENGINES[r.engine as EngineKey] ? (

@@ -20,8 +20,9 @@ model Source {
   baseUrl     String
   type        String      @default("JOB_PORTAL") // JOB_PORTAL | CAREER_SITE | PUBLIC_SOURCE
   status      String      @default("ACTIVE") // ACTIVE | INACTIVE | ERROR
-  scraperType String      @default("STATIC") // STATIC | DYNAMIC | API
-  engine      String      @default("cheerio") // cheerio | crawlee | puppeteer | playwright | selenium
+  scraperType String      @default("STATIC") // STATIC | DYNAMIC | API — bisa CSV untuk multi (mis. "STATIC,DYNAMIC")
+  engine      String      @default("cheerio") // primary engine (= engines[0], disimpan utk backward-compat)
+  engines     String      @default("") // CSV urutan prioritas engine source, mis. "cheerio,puppeteer,playwright" — kosong = fallback ke engine
   schedule    String      @default("every_6_hours") // hourly | every_6_hours | every_12_hours | daily | manual
   lastRunAt   DateTime?
   createdAt   DateTime    @default(now())

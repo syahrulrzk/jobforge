@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -13,7 +13,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Cpu, MoreHorizontal, Pencil, Play, Plus, Power, Trash2 } from "lucide-react";
 import { EmptyState, StatusBadge, timeAgo } from "./ui-bits";
 import { useApi } from "@/hooks/use-api";
-import { ENGINES, ENGINE_KEYS, type EngineKey } from "@/lib/jobforge/engines";
+import { ENGINES, ENGINE_KEYS, parseEngineList, type EngineKey } from "@/lib/jobforge/engines";
 
 interface SourceRow {
   id: string;
@@ -24,6 +24,7 @@ interface SourceRow {
   status: string;
   scraperType: string;
   engine: string;
+  engines: string;
   schedule: string;
   lastRunAt: string | null;
   jobCount: number;
@@ -43,7 +44,26 @@ const SCHEDULE_LABELS: Record<string, string> = {
   manual: "Manual",
 };
 
-const EMPTY_FORM = { name: "", baseUrl: "", type: "JOB_PORTAL", scraperType: "STATIC", schedule: "every_6_hours", engine: "cheerio" };
+const EMPTY_FORM = {
+  name: "",
+  baseUrl: "",
+  types: ["JOB_PORTAL"],
+  scraperTypes: ["STATIC"],
+  schedule: "every_6_hours",
+  engines: ["cheerio"] as EngineKey[],
+};
+
+const TYPE_OPTIONS = [
+  { value: "JOB_PORTAL", label: "Job Portal" },
+  { value: "CAREER_SITE", label: "Career Site" },
+  { value: "PUBLIC_SOURCE", label: "Public Source" },
+];
+
+const SCRAPER_OPTIONS = [
+  { value: "STATIC", label: "STATIC (HTTP + DOM)" },
+  { value: "DYNAMIC", label: "DYNAMIC (SPA render)" },
+  { value: "API", label: "API" },
+];
 
 function EngineBadge({ engine, className = "" }: { engine: string | null | undefined; className?: string }) {
   const meta = engine ? ENGINES[engine as EngineKey] : null;
@@ -53,6 +73,23 @@ function EngineBadge({ engine, className = "" }: { engine: string | null | undef
       <span className={`h-1.5 w-1.5 rounded-full ${meta.dot}`} />
       {meta.name}
     </span>
+  );
+}
+
+/** Chip toggle multi-select — dipakai untuk Tipe, Scraper, dan Engine di dialog source. */
+function ChipToggle({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+        active
+          ? "border-amber-500/60 bg-amber-500/10 text-amber-300"
+          : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300"
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -100,8 +137,26 @@ export function SourcesView({ live }: { live: boolean }) {
   };
   const openEdit = (s: SourceRow) => {
     setEditing(s);
-    setForm({ name: s.name, baseUrl: s.baseUrl, type: s.type, scraperType: s.scraperType, schedule: s.schedule, engine: s.engine || "cheerio" });
+    setForm({
+      name: s.name,
+      baseUrl: s.baseUrl,
+      types: (s.type || "JOB_PORTAL").split(",").map((x) => x.trim()).filter(Boolean),
+      scraperTypes: (s.scraperType || "STATIC").split(",").map((x) => x.trim()).filter(Boolean),
+      schedule: s.schedule,
+      engines: parseEngineList(s.engines || s.engine, s.engine),
+    });
     setDialogOpen(true);
+  };
+
+  const toggleFormValue = (list: string[], value: string): string[] =>
+    list.includes(value) ? (list.length > 1 ? list.filter((v) => v !== value) : list) : [...list, value];
+
+  const toggleFormEngine = (key: EngineKey) => {
+    setForm((f) => ({
+      ...f,
+      // urutan klik = urutan prioritas failover (append di ekor)
+      engines: f.engines.includes(key) ? (f.engines.length > 1 ? f.engines.filter((e) => e !== key) : f.engines) : [...f.engines, key],
+    }));
   };
 
   const save = async () => {
@@ -109,7 +164,14 @@ export function SourcesView({ live }: { live: boolean }) {
       const res = await fetch(editing ? `/api/sources/${editing.id}` : "/api/sources", {
         method: editing ? "PATCH" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify({
+          name: form.name,
+          baseUrl: form.baseUrl,
+          type: form.types,
+          scraperType: form.scraperTypes,
+          schedule: form.schedule,
+          engines: form.engines,
+        }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Gagal menyimpan");
@@ -188,7 +250,7 @@ export function SourcesView({ live }: { live: boolean }) {
             </span>
           </div>
           <p className="hidden text-[11px] text-zinc-600 sm:block">
-            Run dirotasi ke engine aktif — source dengan engine di luar pool otomatis failover
+            Engine Pool global membatasi engine yang boleh jalan — tiap source bisa pin beberapa engine + urutan prioritasnya sendiri (Edit source)
           </p>
         </div>
         <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
@@ -258,9 +320,15 @@ export function SourcesView({ live }: { live: boolean }) {
                   <TableRow key={s.id} className="border-zinc-800/60 hover:bg-zinc-800/30">
                     <TableCell>
                       <p className="font-medium text-zinc-100">{s.name}</p>
-                      <p className="text-[11px] text-zinc-500">{s.baseUrl.replace(/^https?:\/\//, "")} · {s.scraperType}</p>
+                      <p className="text-[11px] text-zinc-500">{s.baseUrl.replace(/^https?:\/\//, "")} · {s.scraperType.split(",").map((x) => x.trim()).join(" · ")}</p>
                     </TableCell>
-                    <TableCell><EngineBadge engine={s.engine} /></TableCell>
+                    <TableCell>
+                      <div className="flex max-w-[190px] flex-wrap gap-1">
+                        {parseEngineList(s.engines || s.engine, s.engine).map((e) => (
+                          <EngineBadge key={e} engine={e} />
+                        ))}
+                      </div>
+                    </TableCell>
                     <TableCell><StatusBadge status={s.status} /></TableCell>
                     <TableCell className="hidden text-sm text-zinc-400 md:table-cell">{SCHEDULE_LABELS[s.schedule] ?? s.schedule}</TableCell>
                     <TableCell className="hidden md:table-cell">
@@ -320,7 +388,7 @@ export function SourcesView({ live }: { live: boolean }) {
       </div>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="border-zinc-800 bg-zinc-950 sm:max-w-md">
+        <DialogContent className="border-zinc-800 bg-zinc-950 sm:max-w-lg">
           <DialogHeader>
             <DialogTitle className="text-zinc-100">{editing ? `Edit ${editing.name}` : "Tambah Source Baru"}</DialogTitle>
           </DialogHeader>
@@ -333,41 +401,76 @@ export function SourcesView({ live }: { live: boolean }) {
               <Label className="text-xs text-zinc-400">Base URL</Label>
               <Input value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://example.com/jobs" className="border-zinc-800 bg-zinc-900" />
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label className="text-xs text-zinc-400">Tipe</Label>
-                <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v })}>
-                  <SelectTrigger className="border-zinc-800 bg-zinc-900"><SelectValue /></SelectTrigger>
-                  <SelectContent className="border-zinc-800 bg-zinc-900">
-                    <SelectItem value="JOB_PORTAL">Job Portal</SelectItem>
-                    <SelectItem value="CAREER_SITE">Career Site</SelectItem>
-                    <SelectItem value="PUBLIC_SOURCE">Public Source</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs text-zinc-400">Scraper</Label>
-                <Select value={form.scraperType} onValueChange={(v) => setForm({ ...form, scraperType: v })}>
-                  <SelectTrigger className="border-zinc-800 bg-zinc-900"><SelectValue /></SelectTrigger>
-                  <SelectContent className="border-zinc-800 bg-zinc-900">
-                    <SelectItem value="STATIC">STATIC (HTTP + DOM)</SelectItem>
-                    <SelectItem value="DYNAMIC">DYNAMIC (SPA render)</SelectItem>
-                    <SelectItem value="API">API</SelectItem>
-                  </SelectContent>
-                </Select>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-zinc-400">Tipe — bisa pilih lebih dari satu</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {TYPE_OPTIONS.map((o) => (
+                  <ChipToggle
+                    key={o.value}
+                    active={form.types.includes(o.value)}
+                    onClick={() => setForm((f) => ({ ...f, types: toggleFormValue(f.types, o.value) }))}
+                  >
+                    {o.label}
+                  </ChipToggle>
+                ))}
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs text-zinc-400">Scraper Engine</Label>
-              <Select value={form.engine} onValueChange={(v) => setForm({ ...form, engine: v })}>
-                <SelectTrigger className="border-zinc-800 bg-zinc-900"><SelectValue /></SelectTrigger>
-                <SelectContent className="border-zinc-800 bg-zinc-900">
-                  {ENGINE_KEYS.map((k) => (
-                    <SelectItem key={k} value={k}>{ENGINES[k].name} — {ENGINES[k].tech}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <p className="text-[11px] text-zinc-600">Engine dipakai bila aktif di Engine Pool, jika tidak run otomatis failover ke engine lain.</p>
+              <Label className="text-xs text-zinc-400">Tipe Scraper — bisa pilih lebih dari satu</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {SCRAPER_OPTIONS.map((o) => (
+                  <ChipToggle
+                    key={o.value}
+                    active={form.scraperTypes.includes(o.value)}
+                    onClick={() => setForm((f) => ({ ...f, scraperTypes: toggleFormValue(f.scraperTypes, o.value) }))}
+                  >
+                    {o.label}
+                  </ChipToggle>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs text-zinc-400">Scraper Engine — bisa lebih dari satu</Label>
+                <button
+                  type="button"
+                  className="text-[11px] font-medium text-amber-400 hover:text-amber-300"
+                  onClick={() => setForm((f) => ({ ...f, engines: [...ENGINE_KEYS] }))}
+                >
+                  Pilih semua engine
+                </button>
+              </div>
+              <div className="grid gap-1.5 sm:grid-cols-2">
+                {ENGINE_KEYS.map((k) => {
+                  const idx = form.engines.indexOf(k);
+                  const active = idx >= 0;
+                  const meta = ENGINES[k];
+                  return (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => toggleFormEngine(k)}
+                      className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                        active ? "border-amber-500/60 bg-amber-500/10" : "border-zinc-800 bg-zinc-900 hover:border-zinc-700"
+                      }`}
+                    >
+                      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot} ${active ? "" : "opacity-40"}`} />
+                      <span className="min-w-0 flex-1">
+                        <span className={`block truncate text-[12px] font-semibold ${active ? "text-amber-300" : "text-zinc-300"}`}>{meta.name}</span>
+                        <span className="block truncate font-mono text-[9px] text-zinc-600">{meta.tech}</span>
+                      </span>
+                      {active && (
+                        <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-amber-500 text-[9px] font-bold text-zinc-950">
+                          {idx + 1}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[11px] text-zinc-600">
+                Nomor = urutan prioritas: run dicoba ke engine 1 → 2 → dst., engine pertama yang sukses dipakai (riwayat failover terlihat di Runs). Engine tetap dibatasi Engine Pool global.
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label className="text-xs text-zinc-400">Schedule</Label>

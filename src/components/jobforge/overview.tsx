@@ -226,7 +226,7 @@ export function OverviewView({ live }: { live: boolean }) {
                 <span className={cn("h-2 w-2 shrink-0 rounded-full", s.status === "ACTIVE" ? "bg-emerald-400" : s.status === "ERROR" ? "bg-rose-400" : "bg-zinc-600")} />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-zinc-200">{s.name}</p>
-                  <p className="text-[11px] text-zinc-500">{s.scraperType.toLowerCase()} · last run {timeAgo(s.lastRunAt)}</p>
+                  <p className="text-[11px] text-zinc-500">{s.scraperType.split(",").map((x) => x.trim().toLowerCase()).join(" · ")} · last run {timeAgo(s.lastRunAt)}</p>
                 </div>
                 <span className="text-sm font-semibold tabular-nums text-zinc-300">{s.jobCount.toLocaleString("id-ID")}</span>
                 <span className="w-10 text-right text-[11px] tabular-nums text-zinc-500">{s.successRate === null ? "—" : `${s.successRate}%`}</span>

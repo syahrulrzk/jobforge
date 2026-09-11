@@ -11,7 +11,7 @@ import {
 import { processBulkImport, generateRequestId } from "./portal";
 import { DELIVERY_ENDPOINT, SETTING_KEYS, type CanonicalJob } from "./types";
 import { extractDomain, resolveLogoUrl } from "./logo";
-import { ENGINES, engineJitter, parseEnginePool, rotateEngine, type EngineKey } from "./engines";
+import { ENGINES, engineJitter, parseEngineList, parseEnginePool, rotateEngine, type EngineKey } from "./engines";
 import { REAL_BOARDS, realBoardError } from "./sources-real";
 
 // ─────────────────────────────────────────────────────────────
@@ -159,6 +159,8 @@ async function canonicalFor(jobId: string): Promise<CanonicalJob | null> {
   };
 }
 
+type ScrapeAttempt = { records: RawJobRecord[]; pagesScraped: number; errors: { type: string; message: string }[] };
+
 async function runScrapeForSource(sourceId: string, forced = false): Promise<void> {
   const source = await db.source.findUnique({ where: { id: sourceId } });
   if (!source) return;
@@ -166,46 +168,116 @@ async function runScrapeForSource(sourceId: string, forced = false): Promise<voi
 
   const settings = await getSettings();
   const profile = profileFor(source.slug);
-
-  // §9.2 engine pool — source's pinned engine wins when active, else rotate over the pool
-  const pool = parseEnginePool(settings.get(SETTING_KEYS.enginePool));
   const s = state();
-  const engine: EngineKey = pool.includes(source.engine as EngineKey)
-    ? (source.engine as EngineKey)
-    : rotateEngine(pool, s.engineCursor++).engine;
 
-  // REAL data mode — live public job APIs, throttled for auto runs (be nice to the boards)
   const realMode = (settings.get(SETTING_KEYS.dataMode) ?? "real") === "real";
   const realFetcher = REAL_BOARDS[source.slug];
+
+  // §9.3 anti-spam — real mode TANPA integrasi nyata tidak boleh generate mock job.
+  // Auto tick: skip diam-diam. Run manual: catat 1 run FAILED dengan pesan yang jujur.
+  if (realMode && !realFetcher) {
+    if (forced) {
+      const primary = parseEngineList(source.engines, source.engine)[0];
+      const run = await db.scrapeRun.create({ data: { sourceId: source.id, engine: primary, status: "RUNNING" } });
+      await db.scrapeRun.update({
+        where: { id: run.id },
+        data: { finishedAt: new Date(), pagesScraped: 0, jobsFound: 0, jobsCreated: 0, errorCount: 1, status: "FAILED" },
+      });
+      await recordError(
+        "SOURCE_ERROR",
+        `Real mode: ${source.name} belum punya integrasi scraper nyata — generator mock dinonaktifkan (anti-spam). Aktifkan board publik yang didukung atau tunggu integrasi board ini.`,
+        { sourceId: source.id }
+      );
+      await log("scrape", "failed", `Real mode: ${source.name} belum terhubung ke scraper nyata — run dihentikan tanpa membuat data palsu`, { source: source.slug });
+      await db.source.update({ where: { id: source.id }, data: { lastRunAt: new Date(), status: "ERROR" } });
+    }
+    return;
+  }
+
+  // REAL data mode — live public job APIs, throttled for auto runs (be nice to the boards)
   if (realMode && realFetcher && !forced) {
     const elapsed = source.lastRunAt ? Date.now() - source.lastRunAt.getTime() : Infinity;
     if (elapsed < 120_000) return;
   }
 
-  const run = await db.scrapeRun.create({
-    data: { sourceId: source.id, engine, status: "RUNNING" },
-  });
+  // §9.3 engine chain — urutan prioritas engine milik source ∩ global Engine Pool.
+  // Kosong (semua engine source di luar pool) → failover rotasi pool seperti §9.2.
+  const pool = parseEnginePool(settings.get(SETTING_KEYS.enginePool));
+  const pinned = parseEngineList(source.engines, source.engine);
+  const candidates = pinned.filter((e) => pool.includes(e));
+  const chain: EngineKey[] = candidates.length > 0 ? candidates : [rotateEngine(pool, s.engineCursor++).engine];
 
+  // Coba engine satu per satu sesuai prioritas — engine pertama yang sukses dipakai.
+  // Tiap attempt mendapat ScrapeRun sendiri supaya riwayat failover terlihat di Runs.
+  let result: ScrapeAttempt | null = null;
+  let winningEngine: EngineKey | null = null;
+  let activeRunId: string | null = null;
+  let attempts = 0;
   const t0 = Date.now();
-  const engineMeta = ENGINES[engine];
-  const jitter = engineJitter(engine);
-  // engine prep/teardown latency — browser engines boot a driver session (§10.4)
-  await new Promise((resolve) => setTimeout(resolve, jitter.latencyMs));
 
-  let result: { records: RawJobRecord[]; pagesScraped: number; errors: { type: string; message: string }[] };
-  if (jitter.failed) {
-    // engine-level failure roll (driver crash / renderer hang) — exercises the failover path
-    result = { records: [], pagesScraped: 1, errors: [{ type: "NETWORK_ERROR", message: `${engineMeta.name} engine: session crashed mid-run, failover queued` }] };
-  } else if (realMode && realFetcher) {
-    try {
-      result = await realFetcher();
-    } catch (err) {
-      const e = realBoardError(source.name, err);
-      result = { records: [], pagesScraped: 1, errors: [e] };
+  for (let i = 0; i < chain.length; i++) {
+    const engine = chain[i];
+    attempts += 1;
+    const engineMeta = ENGINES[engine];
+    const run = await db.scrapeRun.create({ data: { sourceId: source.id, engine, status: "RUNNING" } });
+    const jitter = engineJitter(engine);
+    // engine prep/teardown latency — browser engines boot a driver session (§10.4)
+    await new Promise((resolve) => setTimeout(resolve, jitter.latencyMs));
+
+    if (jitter.failed) {
+      // engine-level failure roll (driver crash / renderer hang) — failover ke engine berikutnya
+      await db.scrapeRun.update({
+        where: { id: run.id },
+        data: { finishedAt: new Date(), pagesScraped: 1, jobsFound: 0, errorCount: 1, status: "FAILED" },
+      });
+      await recordError("NETWORK_ERROR", `${engineMeta.name} engine: session crashed mid-run`, { sourceId: source.id });
+      const next = chain[i + 1] ? ENGINES[chain[i + 1]].name : null;
+      await log("scrape", "warning", `${engineMeta.name} gagal (session crash) — failover ke ${next ?? "tidak ada engine lagi"}`, { source: source.slug });
+      continue;
     }
-  } else {
-    result = scrapeSource(profile, new Set());
+
+    let attempt: ScrapeAttempt;
+    if (realMode && realFetcher) {
+      try {
+        attempt = await realFetcher();
+      } catch (err) {
+        attempt = { records: [], pagesScraped: 1, errors: [realBoardError(source.name, err)] };
+      }
+    } else {
+      attempt = scrapeSource(profile, new Set());
+    }
+
+    const attemptFailed = attempt.errors.length > 0 && attempt.records.length === 0;
+    if (attemptFailed && i < chain.length - 1) {
+      // fetch gagal total — tandai attempt FAILED lalu coba engine prioritas berikutnya
+      await db.scrapeRun.update({
+        where: { id: run.id },
+        data: { finishedAt: new Date(), pagesScraped: attempt.pagesScraped, jobsFound: 0, errorCount: attempt.errors.length, status: "FAILED" },
+      });
+      for (const err of attempt.errors) await recordError(err.type, err.message, { sourceId: source.id });
+      await log("scrape", "warning", `${engineMeta.name} gagal fetch ${source.name} (${attempt.errors[0]?.type ?? "UNKNOWN"}) — failover ke ${ENGINES[chain[i + 1]].name}`, { source: source.slug });
+      continue;
+    }
+
+    result = attempt;
+    winningEngine = engine;
+    activeRunId = run.id;
+    break;
   }
+
+  if (!result || !winningEngine || !activeRunId) {
+    // seluruh chain gagal
+    await db.source.update({ where: { id: source.id }, data: { lastRunAt: new Date(), status: "ERROR" } });
+    await log(
+      "scrape",
+      "failed",
+      `Scrape run gagal total — ${attempts} engine dicoba (${chain.map((e) => ENGINES[e].name).join(" → ")}), semuanya gagal`,
+      { source: source.slug }
+    );
+    return;
+  }
+
+  const engineMeta = ENGINES[winningEngine];
 
   let created = 0;
   let updated = 0;
@@ -286,7 +358,7 @@ async function runScrapeForSource(sourceId: string, forced = false): Promise<voi
   }
 
   await db.scrapeRun.update({
-    where: { id: run.id },
+    where: { id: activeRunId },
     data: {
       finishedAt: new Date(),
       pagesScraped: result.pagesScraped,
@@ -307,10 +379,11 @@ async function runScrapeForSource(sourceId: string, forced = false): Promise<voi
     },
   });
 
+  const failoverNote = attempts > 1 ? ` (failover dari ${attempts - 1} engine sebelumnya)` : "";
   await log(
     "scrape",
     failed ? "failed" : "success",
-    `Scrape run ${failed ? "failed" : "finished"} via ${engineMeta.name} engine — found ${result.records.length}, created ${created}, updated ${updated}, duplicate ${duplicated}`,
+    `Scrape run ${failed ? "failed" : "finished"} via ${engineMeta.name} engine${failoverNote} — found ${result.records.length}, created ${created}, updated ${updated}, duplicate ${duplicated}`,
     { source: source.slug, durationMs: Date.now() - t0 }
   );
 }
@@ -492,7 +565,7 @@ async function advanceStageBatches(): Promise<void> {
       if (lastRun) {
         await db.scrapeRun.update({ where: { id: lastRun.id }, data: { jobsRejected: { increment: 1 } } });
       }
-      await db.job.delete({ where: { id: job.id } });
+      await db.job.deleteMany({ where: { id: job.id } }); // deleteMany: no throw bila job sudah terhapus (race antar batch)
       st.mailtoScanned.delete(job.id);
       purgedNoEmail += 1;
       continue;
@@ -523,7 +596,7 @@ async function advanceStageBatches(): Promise<void> {
   // a live mailto scan of the posting page); mock jobs follow the simulated path.
   const needyReal = await db.job.findMany({
     where: { status: "NEEDS_ENRICHMENT", companyName: { not: null }, contact: null },
-    take: 8,
+    take: 24,
     orderBy: { scrapedAt: "asc" },
     include: { company: true, jobLinks: true },
   });
@@ -534,7 +607,7 @@ async function advanceStageBatches(): Promise<void> {
     orderBy: { scrapedAt: "asc" },
     include: { company: true, contact: true },
   });
-  for (const job of needyReal) {
+  const processNeedyRealJob = async (job: (typeof needyReal)[number]) => {
     const pageUrl = job.jobLinks[0]?.sourceUrl;
     const missingLogo = job.company && !job.company.logoUrl;
     if (missingLogo && job.company) {
@@ -563,15 +636,19 @@ async function advanceStageBatches(): Promise<void> {
           });
           await log("enrich", "success", `HR email discovered on posting page: ${email}`, { jobId: job.id });
           await db.job.update({ where: { id: job.id }, data: { status: "VALIDATING" } });
-          continue;
+          return;
         }
       }
     }
     // Email-mandatory rule — the discovery attempt failed (or was impossible):
     // a job without an HR email may not stay in the DB (spam guard). Purge it.
-    await db.job.delete({ where: { id: job.id } });
+    await db.job.deleteMany({ where: { id: job.id } }); // deleteMany: no throw bila job sudah terhapus (race antar batch)
     st.mailtoScanned.delete(job.id);
     purged += 1;
+  };
+  // worker pool 6 concurrent — scan paralel supaya backlog spam-guard cepat terdrain
+  for (let i = 0; i < needyReal.length; i += 6) {
+    await Promise.all(needyReal.slice(i, i + 6).map(processNeedyRealJob));
   }
   if (purged > 0) {
     await log("validate", "info", `Email mandatory: ${purged} job tanpa email HR dihapus dari DB (spam guard §12)`);

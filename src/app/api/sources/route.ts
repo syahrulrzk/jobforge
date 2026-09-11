@@ -28,6 +28,7 @@ export async function GET() {
       status: s.status,
       scraperType: s.scraperType,
       engine: s.engine,
+      engines: s.engines || s.engine,
       schedule: s.schedule,
       lastRunAt: s.lastRunAt,
       jobCount: s._count.jobLinks,
@@ -61,6 +62,8 @@ export async function POST(req: NextRequest) {
   if (exists) {
     return NextResponse.json({ error: "Source with that name already exists" }, { status: 409 });
   }
+  // §9.3 multi-engine — urutan array = prioritas failover; engine = primary (engines[0])
+  const enginesCsv = d.engines && d.engines.length > 0 ? d.engines.join(",") : d.engine ?? "cheerio";
   const source = await db.source.create({
     data: {
       slug,
@@ -69,7 +72,8 @@ export async function POST(req: NextRequest) {
       type: d.type,
       status: "ACTIVE",
       scraperType: d.scraperType,
-      engine: d.engine ?? "cheerio",
+      engine: enginesCsv.split(",")[0],
+      engines: enginesCsv,
       schedule: d.schedule,
     },
   });

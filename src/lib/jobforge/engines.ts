@@ -114,6 +114,21 @@ export function parseEnginePool(value: string | null | undefined): EngineKey[] {
   return keys.length > 0 ? keys : DEFAULT_ENGINE_POOL;
 }
 
+/**
+ * Parse a source's per-source engine chain (CSV priority list, §9.3).
+ * Falls back to the legacy single `engine` column, then to cheerio.
+ * Order = priority: the runner tries each engine top-down until one succeeds.
+ */
+export function parseEngineList(value: string | null | undefined, fallbackEngine: string | null | undefined): EngineKey[] {
+  const list = (value ?? "")
+    .split(",")
+    .map((k) => k.trim().toLowerCase())
+    .filter((k): k is EngineKey => ENGINE_KEYS.includes(k as EngineKey));
+  if (list.length > 0) return list;
+  const fb = (fallbackEngine ?? "cheerio").trim().toLowerCase();
+  return [(ENGINE_KEYS as string[]).includes(fb) ? (fb as EngineKey) : "cheerio"];
+}
+
 /** Round-robin over the active pool for a run cursor. */
 export function rotateEngine(pool: EngineKey[], cursor: number): { engine: EngineKey; cursor: number } {
   const engine = pool[Math.abs(cursor) % pool.length];
