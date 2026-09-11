@@ -260,7 +260,11 @@ export interface LiveSearchBoardResult {
   found: number;
   created: number;
   duplicate: number;
-  skipped: number; // found relevant but no HR email — not saved (email-mandatory rule)
+  /** job baru/lama yang masuk DB tapi belum lengkap (no/invalid HR email) */
+  needsEnrichment: number;
+  /** job NEEDS_ENRICHMENT lama yang berhasil dikasih email dari payload baru */
+  enriched: number;
+  skipped: number; // record benar-benar dibuang (sekarang: 0 — semua masuk DB)
   durationMs: number;
   error?: string;
 }
@@ -272,14 +276,23 @@ export interface LiveSearchResult {
   totalFound: number;
   totalCreated: number;
   totalDuplicate: number;
+  totalNeedsEnrichment: number;
+  totalEnriched: number;
   totalSkipped: number;
 }
 
 /** Ingest one record through the shared fingerprint path (mirrors engine.ts scrape).
- *  Email-mandatory rule: a record may only enter the DB when an HR email is
- *  discovered FIRST (payload → description scan → live mailto scan of the
- *  posting page). No email → "skipped" — nothing is persisted (spam guard). */
-async function ingestRecord(rec: RawJobRecord, sourceId: string): Promise<"created" | "duplicate" | "skipped"> {
+ *  Enrichment rule (direktif user): a record ALWAYS enters the DB. When an HR
+ *  email is discovered (payload → description scan → live mailto scan of the
+ *  posting page) the job enters the normal pipeline (SCRAPED) with a contact;
+ *  when it is not, the job is saved flagged NEEDS_ENRICHMENT — never dropped.
+ *  Known jobs stuck in NEEDS_ENRICHMENT get a second chance: if this payload
+ *  carries an email the old record lacked, the contact is created and the job
+ *  re-enters validation (recovery §36, no purge). */
+async function ingestRecord(
+  rec: RawJobRecord,
+  sourceId: string
+): Promise<"created" | "duplicate" | "needs_enrichment" | "enriched"> {
   const fp = jobFingerprint(rec.rawCompanyName ?? "", rec.rawTitle, rec.rawLocation);
   const existing = await db.job.findUnique({ where: { fingerprint: fp } });
 
@@ -291,6 +304,24 @@ async function ingestRecord(rec: RawJobRecord, sourceId: string): Promise<"creat
         data: { jobId: existing.id, sourceId, sourceJobId: rec.sourceJobId, sourceUrl: rec.sourceUrl },
       });
     }
+    // Recovery — job lama NEEDS_ENRICHMENT tanpa contact: kalau payload baru
+    // bawa email yang dulu nggak ketemu, simpan contact + balikin ke VALIDATING.
+    if (existing.status === "NEEDS_ENRICHMENT") {
+      const hasContact = await db.jobContact.findUnique({ where: { jobId: existing.id } });
+      if (!hasContact) {
+        const email = rec.publishedEmail ?? extractPublishedEmail(rec.rawDescription ?? "");
+        if (email) {
+          const v = validateEmail(email);
+          if (v.status !== "INVALID") {
+            await db.jobContact.create({
+              data: { jobId: existing.id, hrEmail: email, emailSourceUrl: rec.sourceUrl, emailVerified: v.verified, emailStatus: v.status },
+            });
+            await db.job.update({ where: { id: existing.id }, data: { status: "VALIDATING", statusReason: null } });
+            return "enriched";
+          }
+        }
+      }
+    }
     return "duplicate";
   }
 
@@ -298,9 +329,8 @@ async function ingestRecord(rec: RawJobRecord, sourceId: string): Promise<"creat
   if (!email && rec.sourceUrl) {
     email = await discoverMailto(rec.sourceUrl);
   }
-  if (!email) return "skipped";
-  const v = validateEmail(email);
-  if (v.status === "INVALID") return "skipped";
+  const v = email ? validateEmail(email) : null;
+  const emailOk = !!v && v.status !== "INVALID";
 
   const newJob = await db.job.create({
     data: {
@@ -322,7 +352,14 @@ async function ingestRecord(rec: RawJobRecord, sourceId: string): Promise<"creat
       workplaceType: rec.rawWorkplaceType,
       requirements: JSON.stringify(rec.rawRequirements),
       skills: JSON.stringify(rec.rawSkills),
-      status: "SCRAPED",
+      // Email ada → jalur normal SCRAPED; nggak ada / invalid → NEEDS_ENRICHMENT
+      // (tetap masuk DB — enrichment worker yang lanjut cari emailnya)
+      status: emailOk ? "SCRAPED" : "NEEDS_ENRICHMENT",
+      statusReason: emailOk
+        ? null
+        : v
+          ? "NEEDS_ENRICHMENT: HR Email (invalid) — alamat email di posting tidak valid"
+          : "NEEDS_ENRICHMENT: HR Email not available yet — email HR belum ditemukan di payload/description/posting page",
       scrapedAt: new Date(rec.scrapedAt),
       companyId: null,
     },
@@ -330,16 +367,18 @@ async function ingestRecord(rec: RawJobRecord, sourceId: string): Promise<"creat
   await db.jobSource.create({
     data: { jobId: newJob.id, sourceId, sourceJobId: rec.sourceJobId, sourceUrl: rec.sourceUrl },
   });
-  await db.jobContact.create({
-    data: {
-      jobId: newJob.id,
-      hrEmail: email,
-      emailSourceUrl: rec.sourceUrl,
-      emailVerified: v.verified,
-      emailStatus: v.status,
-    },
-  });
-  return "created";
+  if (emailOk && v) {
+    await db.jobContact.create({
+      data: {
+        jobId: newJob.id,
+        hrEmail: email!,
+        emailSourceUrl: rec.sourceUrl,
+        emailVerified: v.verified,
+        emailStatus: v.status,
+      },
+    });
+  }
+  return emailOk ? "created" : "needs_enrichment";
 }
 
 export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string[]): Promise<LiveSearchResult> {
@@ -423,6 +462,8 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
           found: 0,
           created: 0,
           duplicate: 0,
+          needsEnrichment: 0,
+          enriched: 0,
           skipped: 0,
           durationMs,
           error: msg,
@@ -473,6 +514,8 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
           found: 0,
           created: 0,
           duplicate: 0,
+          needsEnrichment: 0,
+          enriched: 0,
           skipped: 0,
           durationMs,
           error: e.message,
@@ -481,7 +524,8 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
 
       let created = 0;
       let duplicate = 0;
-      let skipped = 0;
+      let needsEnrichment = 0;
+      let enriched = 0;
       // small worker pool — ingest (incl. the posting-page mailto scan for new
       // records) runs concurrently so a fresh keyword cannot exceed the 60s budget
       const list = records.slice(0, MAX_PER_BOARD);
@@ -493,7 +537,8 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
             const res = await ingestRecord(rec, source.id);
             if (res === "created") created += 1;
             else if (res === "duplicate") duplicate += 1;
-            else skipped += 1;
+            else if (res === "enriched") enriched += 1;
+            else needsEnrichment += 1;
           }
         })
       );
@@ -501,7 +546,7 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
       await log(
         "scrape",
         "success",
-        `Live search "${q}" via ${ENGINES[winningEngine].name} engine on ${source.name} — found ${records.length}, created ${created}, duplicate ${duplicate}, skipped-no-email ${skipped}`,
+        `Live search "${q}" via ${ENGINES[winningEngine].name} engine on ${source.name} — found ${records.length}, created ${created}, duplicate ${duplicate}, needs-enrichment ${needsEnrichment}, enriched ${enriched}`,
         { source: source.slug, durationMs }
       );
       return {
@@ -514,7 +559,9 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
         found: records.length,
         created,
         duplicate,
-        skipped,
+        needsEnrichment,
+        enriched,
+        skipped: 0,
         durationMs,
       };
     })
@@ -527,6 +574,8 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
     totalFound: boards.reduce((a, b) => a + b.found, 0),
     totalCreated: boards.reduce((a, b) => a + b.created, 0),
     totalDuplicate: boards.reduce((a, b) => a + b.duplicate, 0),
+    totalNeedsEnrichment: boards.reduce((a, b) => a + b.needsEnrichment, 0),
+    totalEnriched: boards.reduce((a, b) => a + b.enriched, 0),
     totalSkipped: boards.reduce((a, b) => a + b.skipped, 0),
   };
 }

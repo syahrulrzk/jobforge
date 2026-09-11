@@ -531,7 +531,6 @@ async function advanceStageBatches(): Promise<void> {
     orderBy: { scrapedAt: "asc" },
     include: { company: true, contact: true, jobLinks: { include: { source: true } } },
   });
-  let purgedNoEmail = 0;
   for (const job of validating) {
     const res = validateJob({
       companyName: job.company?.name ?? null,
@@ -544,32 +543,10 @@ async function advanceStageBatches(): Promise<void> {
       sourcePlatform: job.jobLinks[0]?.source.slug ?? null,
       sourceUrl: job.jobLinks[0]?.sourceUrl ?? null,
     });
-    // Email-mandatory rule (§12/§17 spam guard) — a real job whose only blocker
-    // is the HR email must not sit in the DB forever. If the single mailto
-    // discovery attempt already ran (or is impossible), purge the row entirely.
-    const emailMissing = res.missing.some((m) => m.startsWith("HR Email"));
-    const pageUrl = job.jobLinks[0]?.sourceUrl ?? null;
-    if (
-      res.outcome === "NEEDS_ENRICHMENT" &&
-      emailMissing &&
-      job.companyName && // real-source jobs only — legacy mock jobs keep their retry loop
-      (!pageUrl || st.mailtoScanned.has(job.id))
-    ) {
-      const srcId = job.jobLinks[0]?.sourceId ?? "";
-      const lastRun = srcId
-        ? await db.scrapeRun.findFirst({
-            where: { sourceId: srcId, status: { in: ["SUCCESS", "FAILED"] } },
-            orderBy: { startedAt: "desc" },
-          })
-        : null;
-      if (lastRun) {
-        await db.scrapeRun.update({ where: { id: lastRun.id }, data: { jobsRejected: { increment: 1 } } });
-      }
-      await db.job.deleteMany({ where: { id: job.id } }); // deleteMany: no throw bila job sudah terhapus (race antar batch)
-      st.mailtoScanned.delete(job.id);
-      purgedNoEmail += 1;
-      continue;
-    }
+    // Enrichment rule (direktif user) — job yang cuma kekurangan email HR
+    // TIDAK di-purge: tetap disimpan ber-status NEEDS_ENRICHMENT dengan
+    // statusReason dari validateJob, supaya kelihatan di Jobs view dan bisa
+    // di-recovery (scan mailto ulang / payload baru) di loop enrichment §36.
     await db.job.update({
       where: { id: job.id },
       data: { status: res.outcome, statusReason: res.reason },
@@ -587,20 +564,19 @@ async function advanceStageBatches(): Promise<void> {
       await log("validate", "warning", res.reason, { jobId: job.id });
     }
   }
-  if (purgedNoEmail > 0) {
-    await log("validate", "info", `Email mandatory: ${purgedNoEmail} job tanpa email HR dihapus dari DB (spam guard)`);
-  }
 
   // NEEDS_ENRICHMENT recovery loop — enrichment worker retry (§36)
   // Real-source jobs get priority (they have genuine enrichment to attempt:
   // a live mailto scan of the posting page); mock jobs follow the simulated path.
+  // Enrichment rule (direktif user): job NEEDS_ENRICHMENT TIDAK pernah di-purge.
+  // Query terbaru dulu (desc) supaya job hasil live search terbaru diprioritaskan
+  // dapat scan mailto; yang lama tetap tersimpan ber-status NEEDS_ENRICHMENT.
   const needyReal = await db.job.findMany({
     where: { status: "NEEDS_ENRICHMENT", companyName: { not: null }, contact: null },
     take: 24,
-    orderBy: { scrapedAt: "asc" },
+    orderBy: { scrapedAt: "desc" },
     include: { company: true, jobLinks: true },
   });
-  let purged = 0;
   const needyMock = await db.job.findMany({
     where: { status: "NEEDS_ENRICHMENT", companyName: null },
     take: 4,
@@ -640,18 +616,13 @@ async function advanceStageBatches(): Promise<void> {
         }
       }
     }
-    // Email-mandatory rule — the discovery attempt failed (or was impossible):
-    // a job without an HR email may not stay in the DB (spam guard). Purge it.
-    await db.job.deleteMany({ where: { id: job.id } }); // deleteMany: no throw bila job sudah terhapus (race antar batch)
-    st.mailtoScanned.delete(job.id);
-    purged += 1;
+    // Enrichment rule (direktif user) — percobaan scan email gagal / tidak
+    // mungkin: job TETAP di DB ber-status NEEDS_ENRICHMENT (jangan dihapus),
+    // mencoba lagi di batch berikutnya bila scan belum pernah jalan di proses ini.
   };
-  // worker pool 6 concurrent — scan paralel supaya backlog spam-guard cepat terdrain
+  // worker pool 6 concurrent — scan paralel supaya backlog enrichment cepat terdrain
   for (let i = 0; i < needyReal.length; i += 6) {
     await Promise.all(needyReal.slice(i, i + 6).map(processNeedyRealJob));
-  }
-  if (purged > 0) {
-    await log("validate", "info", `Email mandatory: ${purged} job tanpa email HR dihapus dari DB (spam guard §12)`);
   }
   for (const job of needyMock) {
     const missingLogo = job.company && !job.company.logoUrl;

@@ -9,8 +9,10 @@
 //                       (§9.3 multi-engine), hasil masuk DB
 //                       (fingerprint dedup) lalu ditampilkan dari DB
 //
-// Aturan email wajib: hanya lowongan yang punya email HR yang masuk DB
-// dan tampil di hasil (withEmail=1) — sisanya dilewati biar tidak spam.
+// Aturan enrichment (direktif user): SEMUA lowongan masuk DB. Yang punya
+// email HR langsung jalan di pipeline (SCRAPED); yang belum ada emailnya
+// disimpan ber-status NEEDS_ENRICHMENT (badge kuning di Jobs view) dan
+// di-recovery worker / scrape berikutnya untuk pencarian email lanjutan.
 //
 // Hasil kartu membuka detail lengkap via JobDetailSheet.
 
@@ -65,6 +67,8 @@ interface LiveBoardResult {
   found: number;
   created: number;
   duplicate: number;
+  needsEnrichment: number;
+  enriched: number;
   skipped: number;
   durationMs: number;
   error?: string;
@@ -77,6 +81,8 @@ interface LiveSearchResponse {
   totalFound: number;
   totalCreated: number;
   totalDuplicate: number;
+  totalNeedsEnrichment: number;
+  totalEnriched: number;
   totalSkipped: number;
 }
 
@@ -220,7 +226,7 @@ export function SearchView() {
       setLiveResult(json);
       applyNow(keyword, locInput, remote);
       if (json.totalCreated > 0) {
-        toast.success(`Scrape selesai ${(json.durationMs / 1000).toFixed(1)}s — ${json.totalCreated} job baru tersimpan${json.totalSkipped > 0 ? `, ${json.totalSkipped} dilewati (tanpa email HR)` : ""}`);
+        toast.success(`Scrape selesai ${(json.durationMs / 1000).toFixed(1)}s — ${json.totalCreated} job baru tersimpan${json.totalNeedsEnrichment > 0 ? `, ${json.totalNeedsEnrichment} ditandai NEEDS_ENRICHMENT (no email HR)` : ""}${json.totalEnriched > 0 ? `, ${json.totalEnriched} lama dienrichment ulang` : ""}`);
       } else {
         toast.info(`Scrape selesai — ${json.totalFound} hasil, semua sudah ada di database`);
       }
@@ -397,7 +403,7 @@ export function SearchView() {
         {mode === "live" && liveRunning && (
           <p className="mt-3 flex items-center gap-2 rounded-lg border border-teal-500/20 bg-teal-500/5 px-3 py-2 text-xs text-teal-300">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Engine menjalankan scrape live ke {selectedNames.length > 0 ? selectedNames.join(", ") : "board aktif"} — engine ngikutin setting tiap source · hanya lowongan dengan email HR yang disimpan…
+            Engine menjalankan scrape live ke {selectedNames.length > 0 ? selectedNames.join(", ") : "board aktif"} — engine ngikutin setting tiap source · semua lowongan masuk DB (tanpa email HR → ditandai NEEDS_ENRICHMENT)…
           </p>
         )}
 
@@ -408,9 +414,14 @@ export function SearchView() {
               Selesai dalam <span className="font-semibold tabular-nums text-zinc-300">{(liveResult.durationMs / 1000).toFixed(1)}s</span> —{" "}
               <span className="font-semibold text-teal-300">{liveResult.totalCreated} job baru</span> tersimpan,{" "}
               {liveResult.totalDuplicate} duplikat dilewati{" "}
-              {liveResult.totalSkipped > 0 && (
+              {liveResult.totalNeedsEnrichment > 0 && (
                 <>
-                  · <span className="text-zinc-400">{liveResult.totalSkipped} dilewati (tanpa email HR)</span>{" "}
+                  · <span className="font-medium text-yellow-300">{liveResult.totalNeedsEnrichment} NEEDS_ENRICHMENT (no email HR)</span>{" "}
+                </>
+              )}
+              {liveResult.totalEnriched > 0 && (
+                <>
+                  · <span className="font-medium text-emerald-300">{liveResult.totalEnriched} lama dienrichment ulang</span>{" "}
                 </>
               )}
               · {liveResult.totalFound} hasil ditemukan
@@ -452,7 +463,8 @@ export function SearchView() {
                     {b.status === "success" ? (
                       <span className="tabular-nums">
                         <span className="font-semibold text-teal-300">{b.created}</span> baru / {b.found} found
-                        {b.skipped > 0 && <span className="text-zinc-500"> · {b.skipped} no-email</span>}
+                        {b.needsEnrichment > 0 && <span className="text-yellow-300/80"> · {b.needsEnrichment} no-email</span>}
+                        {b.enriched > 0 && <span className="text-emerald-300/80"> · {b.enriched} enriched</span>}
                       </span>
                     ) : (
                       <span>

@@ -314,3 +314,26 @@ Stage Summary:
 - Board-resurrection bug fixed permanently (seed no longer auto-creates deleted boards)
 - Live search now uses a real browser engine (Playwright) — first genuine browser automation in the app
 - Recovery: sandbox reset → npx prisma db push + scripts/migrate-proxy-support.ts + scripts/cleanup-sources.ts (if boards reappear)
+---
+Task ID: 16
+Agent: Super Z (main)
+Task: NEEDS_ENRICHMENT flow (direktif user "misal job tetap masuk tapi ditandai NEEDS_ENRICHMENT") — job tanpa email HR tetap masuk DB, bukan di-skip/di-purge
+
+Work Log:
+- Cek DB awal: 5 board internasional (remotive/jobicy/arbeitnow/remoteok/himalayas) ternyata TIDAK ADA di DB (bersih setelah reset) — sesuai intent user; JobStreet sempat ERROR (scheduler tick 15:39 coba 5 engine → 403 Cloudflare → set ERROR, perilaku jujur engine), di-restore ke ACTIVE
+- live-search.ts — ingestRecord dirancang ulang (rule baru "enrichment rule"):
+  - Job baru TANPA/INVALID email HR → tetap di-create dengan status NEEDS_ENRICHMENT + statusReason ("HR Email not available yet..." / "HR Email (invalid)..."), TANPA JobContact; return "needs_enrichment" (dulu: dibuang/"skipped")
+  - Email valid → jalur normal SCRAPED + JobContact (unchanged)
+  - Recovery bonus: job LAMA NEEDS_ENRICHMENT tanpa contact yang payload barunya bawa email → contact dibuat + status balik VALIDATING; return "enriched"
+- live-search.ts — LiveSearchBoardResult += needsEnrichment & enriched (skipped tetap, selalu 0); LiveSearchResult += totalNeedsEnrichment & totalEnriched; log line updated
+- engine.ts — purge/spam-guard DIHAPUS di 2 titik: (1) stage VALIDATING tidak lagi deleteMany job tanpa email → NEEDS_ENRICHMENT bertahan dengan statusReason validateJob; (2) recovery loop §36 tidak purge setelah mailto scan gagal — job tetap disimpan; needy query orderBy scrapedAt desc (baru diprioritaskan scan; hindari starvation window take:24)
+- search.tsx — komentar aturan, toast ("N ditandai NEEDS_ENRICHMENT (no email HR) / M lama dienrichment ulang"), stats bar (chip kuning NEEDS_ENRICHMENT, chip hijau enriched), chip per-board (N no-email kuning, N enriched hijau), running text
+- scripts/test-needs-enrichment.ts — E2E: source uji remotive sementara → live search "developer" → verifikasi → cleanup total
+- scripts/check-db-state.ts, scripts/fix-jobstreet-status.ts — util pendukung
+
+Stage Summary:
+- E2E PASS: search#1 found=3 needsEnrichment=3 (3 job masuk DB NEEDS_ENRICHMENT, reason benar, contact null benar); search#2 duplicate=3 (dedup fingerprint OK, tak dobel); field baru konsisten di response API
+- JobStreet live search tetap jujur: 5 attempt gagal (diblokir), needsEnrichment=0, error per attempt utuh
+- DB akhir: 5 source Indonesia saja (JobStreet ACTIVE + 4 INACTIVE), 0 job (hasil test dibersihkan)
+- tsc clean utk file berubah; homepage 200
+- Catatan: scheduler tick bisa menandai JobStreet ERROR lagi bila masih diblokir — perilaku jujur engine; live search dengan pilihan manual tetap override status

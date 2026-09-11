@@ -1,0 +1,620 @@
+     1→     1→"use client";
+     2→     2→
+     3→     3→// Cari LokerBase (PRD §29 search) — dua mode pencarian:
+     4→     4→//
+     5→     5→//   1. Cari Database  — instan, filter job yang sudah ada di DB
+     6→     6→//   2. Scrape Live    — pilih board dari Data Sources, engine jalan
+     7→     7→//                       scraping on-demand untuk kata kunci posisi;
+     8→     8→//                       engine tiap board ngikutin setting source
+     9→     9→//                       (§9.3 multi-engine), hasil masuk DB
+    10→    10→//                       (fingerprint dedup) lalu ditampilkan dari DB
+    11→    11→//
+    12→    12→// Aturan email wajib: hanya lowongan yang punya email HR yang masuk DB
+    13→    13→// dan tampil di hasil (withEmail=1) — sisanya dilewati biar tidak spam.
+    14→    14→//
+    15→    15→// Hasil kartu membuka detail lengkap via JobDetailSheet.
+    16→    16→
+    17→    17→import { useEffect, useMemo, useState } from "react";
+    18→    18→import { toast } from "sonner";
+    19→    19→import { Badge } from "@/components/ui/badge";
+    20→    20→import { Button } from "@/components/ui/button";
+    21→    21→import { Input } from "@/components/ui/input";
+    22→    22→import { Switch } from "@/components/ui/switch";
+    23→    23→import { AlertTriangle, BriefcaseBusiness, ChevronLeft, ChevronRight, Database, Globe, Layers, Loader2, MapPin, Search, Zap } from "lucide-react";
+    24→    24→import { CompanyAvatar, EmptyState, StatusBadge, formatIDR, timeAgo } from "./ui-bits";
+    25→    25→import { JobDetailSheet } from "./job-detail-sheet";
+    26→    26→import { ENGINES, type EngineKey } from "@/lib/jobforge/engines";
+    27→    27→import { useApi } from "@/hooks/use-api";
+    28→    28→
+    29→    29→interface JobRow {
+    30→    30→  id: string;
+    31→    31→  title: string;
+    32→    32→  company: { id: string; name: string; logoUrl: string; website: string | null } | null;
+    33→    33→  source: { slug: string; name: string; url: string } | null;
+    34→    34→  location: string | null;
+    35→    35→  workplaceType: string | null;
+    36→    36→  salaryMin: number | null;
+    37→    37→  salaryMax: number | null;
+    38→    38→  currency: string | null;
+    39→    39→  status: string;
+    40→    40→  scrapedAt: string;
+    41→    41→}
+    42→    42→
+    43→    43→interface JobsResponse {
+    44→    44→  total: number;
+    45→    45→  page: number;
+    46→    46→  pageSize: number;
+    47→    47→  jobs: JobRow[];
+    48→    48→}
+    49→    49→
+    50→    50→interface LiveEngineAttempt {
+    51→    51→  engine: EngineKey;
+    52→    52→  status: "success" | "failed";
+    53→    53→  httpStatus?: number;
+    54→    54→  durationMs: number;
+    55→    55→  note?: string;
+    56→    56→}
+    57→    57→
+    58→    58→interface LiveBoardResult {
+    59→    59→  board: string;
+    60→    60→  slug: string;
+    61→    61→  engine: EngineKey;
+    62→    62→  engines: EngineKey[];
+    63→    63→  attempts: LiveEngineAttempt[];
+    64→    64→  status: "success" | "failed";
+    65→    65→  found: number;
+    66→    66→  created: number;
+    67→    67→  duplicate: number;
+    68→    68→  skipped: number;
+    69→    69→  durationMs: number;
+    70→    70→  error?: string;
+    71→    71→}
+    72→    72→
+    73→    73→interface LiveSearchResponse {
+    74→    74→  q: string;
+    75→    75→  durationMs: number;
+    76→    76→  boards: LiveBoardResult[];
+    77→    77→  totalFound: number;
+    78→    78→  totalCreated: number;
+    79→    79→  totalDuplicate: number;
+    80→    80→  totalSkipped: number;
+    81→    81→}
+    82→    82→
+    83→    83→// Source dari Data Sources — dipakai sebagai picker board di mode live
+    84→    84→interface SourceRow {
+    85→    85→  slug: string;
+    86→    86→  name: string;
+    87→    87→  status: string;
+    88→    88→  engine: string;
+    89→    89→  engines: string;
+    90→    90→}
+    91→    91→
+    92→    92→const STATUS_DOT: Record<string, string> = {
+    93→    93→  ACTIVE: "bg-emerald-400",
+    94→    94→  ERROR: "bg-rose-400",
+    95→    95→  INACTIVE: "bg-zinc-600",
+    96→    96→};
+    97→    97→
+    98→    98→function primaryEngine(s: SourceRow): string {
+    99→    99→  return (s.engines || s.engine || "cheerio").split(",")[0].trim();
+   100→   100→}
+   101→   101→
+   102→   102→function engineChainLabel(s: SourceRow): string {
+   103→   103→  return (s.engines || s.engine || "cheerio")
+   104→   104→    .split(",")
+   105→   105→    .map((e) => ENGINES[e.trim() as EngineKey]?.name ?? e.trim())
+   106→   106→    .join(" → ");
+   107→   107→}
+   108→   108→
+   109→   109→const POPULAR_POSITIONS = [
+   110→   110→  "Frontend Developer",
+   111→   111→  "Backend Developer",
+   112→   112→  "Fullstack Developer",
+   113→   113→  "Data Analyst",
+   114→   114→  "DevOps Engineer",
+   115→   115→  "UI/UX Designer",
+   116→   116→  "Product Manager",
+   117→   117→  "Business Analyst",
+   118→   118→];
+   119→   119→
+   120→   120→type Mode = "db" | "live";
+   121→   121→
+   122→   122→interface Applied {
+   123→   123→  q: string;
+   124→   124→  loc: string;
+   125→   125→  remote: boolean;
+   126→   126→}
+   127→   127→
+   128→   128→export function SearchView() {
+   129→   129→  const [mode, setMode] = useState<Mode>("db");
+   130→   130→  const [input, setInput] = useState("");
+   131→   131→  const [locInput, setLocInput] = useState("");
+   132→   132→  const [remote, setRemote] = useState(false);
+   133→   133→  const [applied, setApplied] = useState<Applied>({ q: "", loc: "", remote: false });
+   134→   134→  const [page, setPage] = useState(1);
+   135→   135→  const [selectedId, setSelectedId] = useState<string | null>(null);
+   136→   136→
+   137→   137→  const [liveRunning, setLiveRunning] = useState(false);
+   138→   138→  const [liveResult, setLiveResult] = useState<LiveSearchResponse | null>(null);
+   139→   139→
+   140→   140→  // Board picker — daftar source dari Data Sources (DB), bukan hardcode.
+   141→   141→  // Default terpilih: semua source ACTIVE.
+   142→   142→  const [sources, setSources] = useState<SourceRow[]>([]);
+   143→   143→  const [selectedBoards, setSelectedBoards] = useState<Set<string>>(new Set());
+   144→   144→
+   145→   145→  useEffect(() => {
+   146→   146→    void (async () => {
+   147→   147→      try {
+   148→   148→        const res = await fetch("/api/sources", { cache: "no-store" });
+   149→   149→        if (!res.ok) return;
+   150→   150→        const json = (await res.json()) as { sources?: SourceRow[] };
+   151→   151→        const rows = json.sources ?? [];
+   152→   152→        setSources(rows);
+   153→   153→        setSelectedBoards(new Set(rows.filter((s) => s.status === "ACTIVE").map((s) => s.slug)));
+   154→   154→      } catch {
+   155→   155→        // picker tetap kosong — mode live pakai default semua ACTIVE
+   156→   156→      }
+   157→   157→    })();
+   158→   158→  }, []);
+   159→   159→
+   160→   160→  const toggleBoard = (slug: string) => {
+   161→   161→    setSelectedBoards((prev) => {
+   162→   162→      const next = new Set(prev);
+   163→   163→      if (next.has(slug)) next.delete(slug);
+   164→   164→      else next.add(slug);
+   165→   165→      return next;
+   166→   166→    });
+   167→   167→  };
+   168→   168→
+   169→   169→  const selectedNames = useMemo(
+   170→   170→    () => sources.filter((s) => selectedBoards.has(s.slug)).map((s) => s.name),
+   171→   171→    [sources, selectedBoards]
+   172→   172→  );
+   173→   173→
+   174→   174→  const applyNow = (q = input, loc = locInput, rem = remote) => {
+   175→   175→    setApplied({ q: q.trim(), loc: loc.trim(), remote: rem });
+   176→   176→    setPage(1);
+   177→   177→  };
+   178→   178→
+   179→   179→  // debounce 350ms — instant search as you type (database mode only)
+   180→   180→  useEffect(() => {
+   181→   181→    if (mode !== "db") return;
+   182→   182→    const t = setTimeout(() => setApplied({ q: input.trim(), loc: locInput.trim(), remote }), 350);
+   183→   183→    return () => clearTimeout(t);
+   184→   184→  }, [input, locInput, remote, mode]);
+   185→   185→
+   186→   186→  const url = useMemo(() => {
+   187→   187→    const sp = new URLSearchParams({ page: String(page), pageSize: "18", withEmail: "1" });
+   188→   188→    if (applied.q) sp.set("title", applied.q);
+   189→   189→    if (applied.loc) sp.set("location", applied.loc);
+   190→   190→    if (applied.remote) sp.set("remote", "true");
+   191→   191→    return `/api/jobs?${sp.toString()}`;
+   192→   192→  }, [applied, page]);
+   193→   193→
+   194→   194→  const { data, loading } = useApi<JobsResponse>(url);
+   195→   195→  const totalPages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
+   196→   196→  const hasQuery = applied.q || applied.loc || applied.remote;
+   197→   197→
+   198→   198→  // ── Live scrape flow (mode "live") ──
+   199→   199→  const runLiveSearch = async (q = input) => {
+   200→   200→    const keyword = q.trim();
+   201→   201→    if (keyword.length < 2) {
+   202→   202→      toast.error("Ketik posisi yang mau dicari (min. 2 karakter)");
+   203→   203→      return;
+   204→   204→    }
+   205→   205→    if (sources.length > 0 && selectedBoards.size === 0) {
+   206→   206→      toast.error("Pilih minimal 1 board sumber dulu");
+   207→   207→      return;
+   208→   208→    }
+   209→   209→    setLiveRunning(true);
+   210→   210→    setLiveResult(null);
+   211→   211→    toast.info(`Engine menjalankan scrape live ke ${selectedBoards.size} board untuk “${keyword}”…`);
+   212→   212→    try {
+   213→   213→      const res = await fetch("/api/search/live", {
+   214→   214→        method: "POST",
+   215→   215→        headers: { "Content-Type": "application/json" },
+   216→   216→        body: JSON.stringify({ q: keyword, sources: [...selectedBoards] }),
+   217→   217→      });
+   218→   218→      const json = (await res.json()) as LiveSearchResponse & { error?: string };
+   219→   219→      if (!res.ok) throw new Error(json.error ?? "Live scrape gagal");
+   220→   220→      setLiveResult(json);
+   221→   221→      applyNow(keyword, locInput, remote);
+   222→   222→      if (json.totalCreated > 0) {
+   223→   223→        toast.success(`Scrape selesai ${(json.durationMs / 1000).toFixed(1)}s — ${json.totalCreated} job baru tersimpan${json.totalSkipped > 0 ? `, ${json.totalSkipped} dilewati (tanpa email HR)` : ""}`);
+   224→   224→      } else {
+   225→   225→        toast.info(`Scrape selesai — ${json.totalFound} hasil, semua sudah ada di database`);
+   226→   226→      }
+   227→   227→    } catch (e) {
+   228→   228→      toast.error(e instanceof Error ? e.message : "Live scrape gagal");
+   229→   229→    } finally {
+   230→   230→      setLiveRunning(false);
+   231→   231→    }
+   232→   232→  };
+   233→   233→
+   234→   234→  const pickPosition = (p: string) => {
+   235→   235→    setInput(p);
+   236→   236→    if (mode === "db") applyNow(p, locInput, remote);
+   237→   237→    else void runLiveSearch(p);
+   238→   238→  };
+   239→   239→
+   240→   240→  const switchMode = (m: Mode) => {
+   241→   241→    setMode(m);
+   242→   242→    if (m === "db") applyNow(); // instant db search with current keywords
+   243→   243→  };
+   244→   244→
+   245→   245→  return (
+   246→   246→    <div className="space-y-4">
+   247→   247→      {/* Hero search */}
+   248→   248→      <section className="rounded-xl border border-zinc-800 bg-gradient-to-br from-zinc-900 via-zinc-900/60 to-zinc-900/20 p-6">
+   249→   249→        <div className="flex flex-wrap items-center justify-between gap-3">
+   250→   250→          <div className="flex items-center gap-2.5">
+   251→   251→            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-amber-500/15">
+   252→   252→              <BriefcaseBusiness className="h-4.5 w-4.5 text-amber-400" />
+   253→   253→            </div>
+   254→   254→            <div>
+   255→   255→              <h2 className="text-base font-bold text-zinc-100">Cari LokerBase</h2>
+   256→   256→              <p className="text-xs text-zinc-500">
+   257→   257→                {mode === "db"
+   258→   258→                  ? "Filter instan dari database job hasil scraping pipeline"
+   259→   259→                  : "Pilih board dari Data Sources — engine scrape ngikutin setting engine di tiap source"}
+   260→   260→              </p>
+   261→   261→            </div>
+   262→   262→          </div>
+   263→   263→
+   264→   264→          {/* Mode toggle */}
+   265→   265→          <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-950 p-0.5">
+   266→   266→            <button
+   267→   267→              onClick={() => switchMode("db")}
+   268→   268→              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+   269→   269→                mode === "db" ? "bg-amber-500/15 text-amber-300" : "text-zinc-500 hover:text-zinc-300"
+   270→   270→              }`}
+   271→   271→            >
+   272→   272→              <Database className="h-3.5 w-3.5" /> Cari Database
+   273→   273→            </button>
+   274→   274→            <button
+   275→   275→              onClick={() => switchMode("live")}
+   276→   276→              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+   277→   277→                mode === "live" ? "bg-teal-500/15 text-teal-300" : "text-zinc-500 hover:text-zinc-300"
+   278→   278→              }`}
+   279→   279→            >
+   280→   280→              <Zap className="h-3.5 w-3.5" /> Scrape Live (Engine)
+   281→   281→            </button>
+   282→   282→          </div>
+   283→   283→        </div>
+   284→   284→
+   285→   285→        <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+   286→   286→          <div className="relative min-w-0 flex-1">
+   287→   287→            <Search className="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+   288→   288→            <Input
+   289→   289→              autoFocus
+   290→   290→              placeholder={mode === "db" ? "Posisi yang dicari — mis. frontend developer, data analyst…" : "Posisi buat di-scrape live — mis. business analyst…"}
+   291→   291→              value={input}
+   292→   292→              onChange={(e) => setInput(e.target.value)}
+   293→   293→              onKeyDown={(e) => e.key === "Enter" && (mode === "db" ? applyNow() : void runLiveSearch())}
+   294→   294→              disabled={liveRunning}
+   295→   295→              className="h-11 border-zinc-800 bg-zinc-950 pl-9 text-sm"
+   296→   296→            />
+   297→   297→          </div>
+   298→   298→          <div className="relative sm:w-56">
+   299→   299→            <MapPin className="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+   300→   300→            <Input
+   301→   301→              placeholder="Lokasi (opsional)"
+   302→   302→              value={locInput}
+   303→   303→              onChange={(e) => setLocInput(e.target.value)}
+   304→   304→              onKeyDown={(e) => e.key === "Enter" && (mode === "db" ? applyNow() : void runLiveSearch())}
+   305→   305→              disabled={liveRunning}
+   306→   306→              className="h-11 border-zinc-800 bg-zinc-950 pl-9 text-sm"
+   307→   307→            />
+   308→   308→          </div>
+   309→   309→          {mode === "db" ? (
+   310→   310→            <Button className="h-11 bg-amber-500 px-5 text-zinc-950 hover:bg-amber-400" onClick={() => applyNow()}>
+   311→   311→              <Search className="h-4 w-4" /> Cari
+   312→   312→            </Button>
+   313→   313→          ) : (
+   314→   314→            <Button
+   315→   315→              className="h-11 bg-teal-500 px-5 text-zinc-950 hover:bg-teal-400"
+   316→   316→              onClick={() => void runLiveSearch()}
+   317→   317→              disabled={liveRunning}
+   318→   318→            >
+   319→   319→              {liveRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+   320→   320→              {liveRunning ? "Scraping…" : "Scrape Sekarang"}
+   321→   321→            </Button>
+   322→   322→          )}
+   323→   323→        </div>
+   324→   324→
+   325→   325→        {/* Board picker (live mode) — sumber = Data Sources yang sudah ditambahkan */}
+   326→   326→        {mode === "live" && (
+   327→   327→          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+   328→   328→            <span className="mr-1 flex items-center gap-1 text-[11px] text-zinc-500">
+   329→   329→              <Layers className="h-3.5 w-3.5" /> Board sumber:
+   330→   330→            </span>
+   331→   331→            {sources.map((s) => {
+   332→   332→              const on = selectedBoards.has(s.slug);
+   333→   333→              const pe = ENGINES[primaryEngine(s) as EngineKey];
+   334→   334→              return (
+   335→   335→                <button
+   336→   336→                  key={s.slug}
+   337→   337→                  type="button"
+   338→   338→                  disabled={liveRunning}
+   339→   339→                  onClick={() => toggleBoard(s.slug)}
+   340→   340→                  title={`${s.name} · ${s.status} · engine: ${engineChainLabel(s)}`}
+   341→   341→                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors disabled:opacity-50 ${
+   342→   342→                    on
+   343→   343→                      ? "border-teal-500/50 bg-teal-500/15 text-teal-200"
+   344→   344→                      : "border-zinc-800 bg-zinc-900 text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+   345→   345→                  }`}
+   346→   346→                >
+   347→   347→                  <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[s.status] ?? "bg-zinc-600"}`} />
+   348→   348→                  {s.name}
+   349→   349→                  <span className={`rounded px-1 text-[9px] font-semibold ${on && pe ? pe.badge : "bg-zinc-800 text-zinc-500"}`}>
+   350→   350→                    {pe?.name ?? primaryEngine(s)}
+   351→   351→                  </span>
+   352→   352→                </button>
+   353→   353→              );
+   354→   354→            })}
+   355→   355→            {sources.length === 0 && (
+   356→   356→              <span className="text-[11px] text-zinc-600">
+   357→   357→                Belum ada source — tambahkan dulu di menu Data Sources
+   358→   358→              </span>
+   359→   359→            )}
+   360→   360→            {sources.length > 0 && selectedBoards.size < sources.length && (
+   361→   361→              <button
+   362→   362→                type="button"
+   363→   363→                disabled={liveRunning}
+   364→   364→                onClick={() => setSelectedBoards(new Set(sources.filter((s) => s.status === "ACTIVE").map((s) => s.slug)))}
+   365→   365→                className="rounded-full border border-dashed border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-500 transition-colors hover:border-zinc-600 hover:text-zinc-300 disabled:opacity-50"
+   366→   366→              >
+   367→   367→                Reset ke semua aktif
+   368→   368→              </button>
+   369→   369→            )}
+   370→   370→          </div>
+   371→   371→        )}
+   372→   372→
+   373→   373→        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+   374→   374→          <span className="mr-1 text-[11px] text-zinc-600">{mode === "db" ? "Populer:" : "Coba scrape:"}</span>
+   375→   375→          {POPULAR_POSITIONS.map((p) => (
+   376→   376→            <button
+   377→   377→              key={p}
+   378→   378→              disabled={liveRunning}
+   379→   379→              onClick={() => pickPosition(p)}
+   380→   380→              className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors disabled:opacity-50 ${
+   381→   381→                applied.q.toLowerCase() === p.toLowerCase()
+   382→   382→                  ? mode === "live"
+   383→   383→                    ? "border-teal-500/50 bg-teal-500/15 text-teal-300"
+   384→   384→                    : "border-amber-500/50 bg-amber-500/15 text-amber-300"
+   385→   385→                  : "border-zinc-800 bg-zinc-900 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+   386→   386→              }`}
+   387→   387→            >
+   388→   388→              {p}
+   389→   389→            </button>
+   390→   390→          ))}
+   391→   391→          <label className="ml-auto flex cursor-pointer items-center gap-2 text-[11px] text-zinc-400">
+   392→   392→            <Globe className="h-3.5 w-3.5 text-teal-400" /> Hanya remote
+   393→   393→            <Switch checked={remote} onCheckedChange={(v) => setRemote(v)} className="data-[state=checked]:bg-teal-500" />
+   394→   394→          </label>
+   395→   395→        </div>
+   396→   396→
+   397→   397→        {mode === "live" && liveRunning && (
+   398→   398→          <p className="mt-3 flex items-center gap-2 rounded-lg border border-teal-500/20 bg-teal-500/5 px-3 py-2 text-xs text-teal-300">
+   399→   399→            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+   400→   400→            Engine menjalankan scrape live ke {selectedNames.length > 0 ? selectedNames.join(", ") : "board aktif"} — engine ngikutin setting tiap source · hanya lowongan dengan email HR yang disimpan…
+   401→   401→          </p>
+   402→   402→        )}
+   403→   403→
+   404→   404→        {/* Live scrape breakdown per board */}
+   405→   405→        {mode === "live" && liveResult && (
+   406→   406→          <div className="mt-3 space-y-2">
+   407→   407→            <p className="text-xs text-zinc-500">
+   408→   408→              Selesai dalam <span className="font-semibold tabular-nums text-zinc-300">{(liveResult.durationMs / 1000).toFixed(1)}s</span> —{" "}
+   409→   409→              <span className="font-semibold text-teal-300">{liveResult.totalCreated} job baru</span> tersimpan,{" "}
+   410→   410→              {liveResult.totalDuplicate} duplikat dilewati{" "}
+   411→   411→              {liveResult.totalSkipped > 0 && (
+   412→   412→                <>
+   413→   413→                  · <span className="text-zinc-400">{liveResult.totalSkipped} dilewati (tanpa email HR)</span>{" "}
+   414→   414→                </>
+   415→   415→              )}
+   416→   416→              · {liveResult.totalFound} hasil ditemukan
+   417→   417→            </p>
+   418→   418→            <div className="flex flex-wrap gap-1.5">
+   419→   419→              {liveResult.boards.map((b) => {
+   420→   420→                const attemptDetail = (b.attempts ?? []).length
+   421→   421→                  ? (b.attempts as LiveEngineAttempt[])
+   422→   422→                      .map((a) => `${ENGINES[a.engine as EngineKey]?.name ?? a.engine}: ${a.status === "success" ? "sukses" : "gagal"}${a.httpStatus ? ` HTTP ${a.httpStatus}` : ""} (${a.durationMs}ms)${a.note ? ` — ${a.note}` : ""}`)
+   423→   423→                      .join("  |  ")
+   424→   424→                  : null;
+   425→   425→                return (
+   426→   426→                  <span
+   427→   427→                    key={b.slug}
+   428→   428→                    className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] ${
+   429→   429→                      b.status === "success"
+   430→   430→                        ? "border-zinc-800 bg-zinc-900 text-zinc-300"
+   431→   431→                        : "border-rose-500/30 bg-rose-500/5 text-rose-300"
+   432→   432→                    }`}
+   433→   433→                    title={attemptDetail ?? b.error ?? `${b.board} — ${b.durationMs}ms`}
+   434→   434→                  >
+   435→   435→                    <span className={`h-1.5 w-1.5 rounded-full ${b.status === "success" ? "bg-emerald-400" : "bg-rose-400"}`} />
+   436→   436→                    {b.board}
+   437→   437→                    {/* seluruh engine yang dicoba — failover chain terlihat, bukan cuma 1 */}
+   438→   438→                    {(b.attempts ?? [{ engine: b.engine, status: b.status, durationMs: b.durationMs }]).map((a, ai) => {
+   439→   439→                      const m = ENGINES[a.engine as EngineKey];
+   440→   440→                      const fail = a.status !== "success";
+   441→   441→                      return (
+   442→   442→                        <span
+   443→   443→                          key={`${b.slug}-${ai}`}
+   444→   444→                          className={`rounded px-1 text-[9px] font-semibold ${
+   445→   445→                            fail ? "bg-zinc-800 text-zinc-500 line-through decoration-zinc-600" : m?.badge ?? "bg-zinc-800 text-zinc-400"
+   446→   446→                          }`}
+   447→   447→                        >
+   448→   448→                          {m?.name ?? a.engine}
+   449→   449→                        </span>
+   450→   450→                      );
+   451→   451→                    })}
+   452→   452→                    {b.status === "success" ? (
+   453→   453→                      <span className="tabular-nums">
+   454→   454→                        <span className="font-semibold text-teal-300">{b.created}</span> baru / {b.found} found
+   455→   455→                        {b.skipped > 0 && <span className="text-zinc-500"> · {b.skipped} no-email</span>}
+   456→   456→                      </span>
+   457→   457→                    ) : (
+   458→   458→                      <span>
+   459→   459→                        gagal
+   460→   460→                        {(b.attempts?.length ?? 0) > 1 && <span className="text-zinc-500"> · {b.attempts.length} engine</span>}
+   461→   461→                      </span>
+   462→   462→                    )}
+   463→   463→                  </span>
+   464→   464→                );
+   465→   465→              })}
+   466→   466→            </div>
+   467→   467→            {/* Alasan gagal ditulis LANGSUNG di sini — bukan cuma di tooltip */}
+   468→   468→            {liveResult.boards.some((b) => b.status === "failed" && b.error) && (
+   469→   469→              <div className="space-y-1.5 rounded-lg border border-rose-500/20 bg-rose-500/5 px-3 py-2">
+   470→   470→                {liveResult.boards
+   471→   471→                  .filter((b) => b.status === "failed" && b.error)
+   472→   472→                  .map((b) => (
+   473→   473→                    <p key={b.slug} className="flex items-start gap-1.5 text-[11px] leading-relaxed text-rose-300">
+   474→   474→                      <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+   475→   475→                      <span>
+   476→   476→                        <span className="font-semibold">{b.board}</span> — {b.error}
+   477→   477→                      </span>
+   478→   478→                    </p>
+   479→   479→                  ))}
+   480→   480→                <p className="text-[11px] leading-relaxed text-zinc-500">
+   481→   481→                  Portal yang memblokir scraper anonim butuh akses resmi atau proxy — board publik lain tetap bisa dipakai untuk mencari.
+   482→   482→                </p>
+   483→   483→              </div>
+   484→   484→            )}
+   485→   485→          </div>
+   486→   486→        )}
+   487→   487→      </section>
+   488→   488→
+   489→   489→      {/* Result count */}
+   490→   490→      <div className="flex items-center justify-between">
+   491→   491→        <p className="text-xs text-zinc-500">
+   492→   492→          {loading && !data ? (
+   493→   493→            "Mencari…"
+   494→   494→          ) : !data ? (
+   495→   495→            "—"
+   496→   496→          ) : hasQuery ? (
+   497→   497→            <>
+   498→   498→              <span className="font-semibold tabular-nums text-zinc-300">{data.total.toLocaleString("id-ID")}</span> lowongan ditemukan
+   499→   499→              {applied.q && <> untuk <span className={mode === "live" ? "text-teal-300" : "text-amber-300"}>“{applied.q}”</span></>}
+   500→   500→              {applied.loc && <> di <span className={mode === "live" ? "text-teal-300" : "text-amber-300"}>“{applied.loc}”</span></>}
+   501→   501→              {applied.remote && <> · <span className="text-teal-300">remote only</span></>}
+   502→   502→            </>
+   503→   503→          ) : (
+   504→   504→            <>
+   505→   505→              <span className="font-semibold tabular-nums text-zinc-300">{data.total.toLocaleString("id-ID")}</span> lowongan tersedia — masukkan kata kunci untuk menyaring
+   506→   506→            </>
+   507→   507→          )}
+   508→   508→        </p>
+   509→   509→        <div className="flex gap-1.5">
+   510→   510→          {mode === "live" && liveResult && !liveRunning && (
+   511→   511→            <Button
+   512→   512→              variant="outline"
+   513→   513→              size="sm"
+   514→   514→              className="h-7 border-teal-500/30 bg-teal-500/10 text-xs text-teal-300 hover:bg-teal-500/20"
+   515→   515→              onClick={() => void runLiveSearch()}
+   516→   516→            >
+   517→   517→              <Zap className="h-3 w-3" /> Scrape ulang
+   518→   518→            </Button>
+   519→   519→          )}
+   520→   520→          {hasQuery && (
+   521→   521→            <Button
+   522→   522→              variant="outline"
+   523→   523→              size="sm"
+   524→   524→              className="h-7 border-zinc-800 bg-zinc-900 text-xs text-zinc-400"
+   525→   525→              onClick={() => {
+   526→   526→                setInput("");
+   527→   527→                setLocInput("");
+   528→   528→                setRemote(false);
+   529→   529→                setApplied({ q: "", loc: "", remote: false });
+   530→   530→                setPage(1);
+   531→   531→              }}
+   532→   532→            >
+   533→   533→              Reset
+   534→   534→            </Button>
+   535→   535→          )}
+   536→   536→        </div>
+   537→   537→      </div>
+   538→   538→
+   539→   539→      {/* Results grid */}
+   540→   540→      {!data ? (
+   541→   541→        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+   542→   542→          {Array.from({ length: 8 }).map((_, i) => (
+   543→   543→            <div key={i} className="h-[132px] animate-pulse rounded-xl border border-zinc-800 bg-zinc-900/60" />
+   544→   544→          ))}
+   545→   545→        </div>
+   546→   546→      ) : data.jobs.length === 0 ? (
+   547→   547→        <EmptyState
+   548→   548→          title="Tidak ada lowongan yang cocok"
+   549→   549→          hint={
+   550→   550→            mode === "live"
+   551→   551→              ? "Coba kata kunci lain, scrape ulang, atau pilih board lain di picker Board sumber — engine butuh board yang punya posisi tersebut"
+   552→   552→              : "Coba kata kunci lain, kurangi filter, atau pakai mode Scrape Live untuk mencari dari board langsung"
+   553→   553→          }
+   554→   554→        />
+   555→   555→      ) : (
+   556→   556→        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+   557→   557→          {data.jobs.map((j) => (
+   558→   558→            <button
+   559→   559→              key={j.id}
+   560→   560→              onClick={() => setSelectedId(j.id)}
+   561→   561→              className="group flex h-full flex-col gap-2.5 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 text-left transition-colors hover:border-amber-500/40 hover:bg-zinc-900"
+   562→   562→            >
+   563→   563→              <div className="flex items-start gap-3">
+   564→   564→                <CompanyAvatar name={j.company?.name ?? j.title} logoUrl={j.company?.logoUrl} website={j.company?.website} size={40} />
+   565→   565→                <div className="min-w-0 flex-1">
+   566→   566→                  <p className="line-clamp-2 text-sm leading-snug font-semibold text-zinc-100 group-hover:text-amber-200">{j.title}</p>
+   567→   567→                  <p className="mt-0.5 truncate text-xs text-zinc-400">{j.company?.name ?? "Perusahaan belum terpetakan"}</p>
+   568→   568→                </div>
+   569→   569→              </div>
+   570→   570→
+   571→   571→              <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-400">
+   572→   572→                {j.workplaceType === "REMOTE" && (
+   573→   573→                  <span className="inline-flex items-center gap-1 rounded-md bg-teal-500/10 px-1.5 py-0.5 text-[10px] font-medium text-teal-300">
+   574→   574→                    <Globe className="h-3 w-3" /> Remote
+   575→   575→                  </span>
+   576→   576→                )}
+   577→   577→                {j.location && (
+   578→   578→                  <span className="inline-flex min-w-0 items-center gap-1">
+   579→   579→                    <MapPin className="h-3 w-3 shrink-0" />
+   580→   580→                    <span className="truncate">{j.location}</span>
+   581→   581→                  </span>
+   582→   582→                )}
+   583→   583→              </div>
+   584→   584→
+   585→   585→              <div className="mt-auto flex items-center justify-between gap-2 border-t border-zinc-800/80 pt-2.5">
+   586→   586→                <span className="font-mono text-xs tabular-nums text-emerald-300">{formatIDR(j.salaryMin, j.salaryMax, j.currency)}</span>
+   587→   587→                <div className="flex items-center gap-1.5">
+   588→   588→                  {j.source && <Badge variant="outline" className="border-zinc-700 bg-zinc-800/60 px-1.5 py-0 text-[10px] text-zinc-400">{j.source.name}</Badge>}
+   589→   589→                  <StatusBadge status={j.status} />
+   590→   590→                </div>
+   591→   591→              </div>
+   592→   592→
+   593→   593→              <p className="text-[10px] text-zinc-600">{timeAgo(j.scrapedAt)}</p>
+   594→   594→            </button>
+   595→   595→          ))}
+   596→   596→        </div>
+   597→   597→      )}
+   598→   598→
+   599→   599→      {/* Pagination */}
+   600→   600→      {data && data.jobs.length > 0 && (
+   601→   601→        <div className="flex items-center justify-between">
+   602→   602→          <p className="text-xs text-zinc-500">
+   603→   603→            Halaman {data.page} dari {totalPages}
+   604→   604→          </p>
+   605→   605→          <div className="flex gap-1.5">
+   606→   606→            <Button variant="outline" size="sm" className="h-7 border-zinc-800 bg-zinc-900" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+   607→   607→              <ChevronLeft className="h-3.5 w-3.5" /> Prev
+   608→   608→            </Button>
+   609→   609→            <Button variant="outline" size="sm" className="h-7 border-zinc-800 bg-zinc-900" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
+   610→   610→              Next <ChevronRight className="h-3.5 w-3.5" />
+   611→   611→            </Button>
+   612→   612→          </div>
+   613→   613→        </div>
+   614→   614→      )}
+   615→   615→
+   616→   616→      <JobDetailSheet selectedId={selectedId} onClose={() => setSelectedId(null)} />
+   617→   617→    </div>
+   618→   618→  );
+   619→   619→}
+   620→   620→
