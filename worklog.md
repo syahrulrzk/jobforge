@@ -27,3 +27,16 @@ Work Log:
 
 Stage Summary:
 - Activity Console card on dashboard now fills entire card height (no dead space), 60-log buffer, click still jumps to full console
+---
+Task ID: 3
+Agent: Super Z (main)
+Task: Activity Console card too tall (60-log content inflated grid row height)
+
+Work Log:
+- Root cause: flex-1 log container's content contributed to card intrinsic height → grid row grew past Sources Health
+- Fix: log container → absolute inset-x-4 bottom-4 top-12 overflow-y-auto (fills card, zero contribution to row height)
+- Card height now exactly matches Sources Health; 60 logs scroll internally
+- Verified: tsc clean, page HTTP 200
+
+Stage Summary:
+- Dashboard console card = same height as Sources Health, logs scroll inside, no dead space, no over-extend
