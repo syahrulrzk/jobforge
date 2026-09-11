@@ -83,3 +83,21 @@ Stage Summary:
 - Every company now renders a logo everywhere (real logo via providers, or generated badge for unknown/fictional brands)
 - API Deliveries view shows logos per delivery row
 - logo_url is mandatory+validated in the portal import payload — proven end-to-end with live import
+---
+Task ID: 7
+Agent: Super Z (main)
+Task: "ko lu generate bro" — replace generated badges with REAL company logos (fictional seed companies have no real logos)
+
+Work Log:
+- Verified provider reality: logo.clearbit.com unreachable from env AND sunset Dec 2025; Google s2 favicons returns 200 for 30 of 35 candidate real domains (curl test script scripts/test-logo-providers2.sh)
+- logo.ts: removed dead Clearbit from chain — fetchLogoPng now Google s2 → DuckDuckGo (no more 4s timeout per logo); resolveLogoUrl() persists Google s2 PNG URLs
+- data.ts: replaced all 30 fictional COMPANY_TEMPLATES with real Indonesian companies (Tokopedia, Shopee, Bukalapak, Blibli, Lazada, Traveloka, Tiket, Grab, Ruangguru, Zenius, Halodoc, Alodokter, DANA, Kredivo, Midtrans, Stockbit, Ajaib, SiCepat, Anteraja, Ninja Xpress, Telkomsel, XL Axiata, Detik, Kompas, Kumparan, IDN Media, Glints, Kalibrr, PasarPolis, Sayurbox) — kept noPublicEmail/badMx flag distribution for seed variety
+- scripts/migrate-real-companies.ts: migrated 30 Company rows 1:1 (name/normalizedName/website/logoUrl/industry), recomputed 860 job fingerprints, refreshed 794 JobContact emails to new domains, 0 Clearbit URLs remain
+- Fixed pre-existing tsc error engine.ts:472 (Job has no updatedAt → scrapedAt for SENT→PUBLISHED promotion)
+- jobs API now returns company.website (avatar proxy fallback needs domain); dashboard/deliveries/contacts already had it
+- Verified live: dashboard topCompanies + deliveries + jobs all return real names with google-s2 logoUrls; /api/logo/{domain} serves image/png in 0.03–0.16s via google-s2; tsc clean; engine tick running healthy
+
+Stage Summary:
+- Logos are now REAL brand favicons everywhere (dashboard leaderboard, jobs, companies, contacts, deliveries) — no generated badges for the 30 seeded companies
+- Portal delivery JSON payload includes company.logo_url (Google s2 URL) per canonicalFor() → deliverReadyJobs()
+- Proxy fallback chain fast again (dead Clearbit removed)

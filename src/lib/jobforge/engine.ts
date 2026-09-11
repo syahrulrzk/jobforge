@@ -469,7 +469,7 @@ async function advanceStageBatches(): Promise<void> {
 
   // SENT → PUBLISHED (portal confirms publish async)
   const sentJobs = await db.job.findMany({
-    where: { status: "SENT", updatedAt: { lt: new Date(t - 4_000) } },
+    where: { status: "SENT", scrapedAt: { lt: new Date(t - 4_000) } },
     take: 20,
   });
   for (const job of sentJobs) {

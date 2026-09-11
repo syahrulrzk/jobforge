@@ -4,9 +4,11 @@
 // via public logo providers — no API key required.
 //
 // Provider chain:
-//   1. Clearbit Logo API   https://logo.clearbit.com/{domain}        PNG, up to 512px
-//   2. Google favicon svc  https://www.google.com/s2/favicons?...    PNG 128px
-//   3. DuckDuckGo icons    https://icons.duckduckgo.com/ip3/...      ICO/PNG
+//   1. Google favicon svc  https://www.google.com/s2/favicons?...    PNG 128px
+//   2. DuckDuckGo icons    https://icons.duckduckgo.com/ip3/...      ICO/PNG
+//
+// NOTE: Clearbit Logo API (logo.clearbit.com) was sunset Dec 2025 —
+// removed from the chain, requests hang/fail and waste the timeout.
 // ─────────────────────────────────────────────────────────────
 
 export function extractDomain(website: string | null | undefined): string | null {
@@ -20,10 +22,6 @@ export function extractDomain(website: string | null | undefined): string | null
   }
 }
 
-export function clearbitLogoUrl(domain: string, size = 256): string {
-  return `https://logo.clearbit.com/${domain}?size=${size}`;
-}
-
 export function googleFaviconUrl(domain: string, size = 128): string {
   return `https://www.google.com/s2/favicons?domain=${domain}&sz=${size}`;
 }
@@ -32,10 +30,10 @@ export function duckduckgoIconUrl(domain: string): string {
   return `https://icons.duckduckgo.com/ip3/${domain}`;
 }
 
-/** Best direct PNG link to persist in DB — CDN resolves the actual image at display time. */
+/** Best direct PNG link to persist in DB — Google's CDN resolves the actual image at display time. */
 export function resolveLogoUrl(website: string | null | undefined): string | null {
   const domain = extractDomain(website);
-  return domain ? clearbitLogoUrl(domain) : null;
+  return domain ? googleFaviconUrl(domain, 128) : null;
 }
 
 const FETCH_TIMEOUT_MS = 4000;
@@ -51,7 +49,6 @@ export interface LogoFetchResult {
 /** Fetch actual logo bytes through the provider chain — used by the /api/logo proxy. */
 export async function fetchLogoPng(domain: string): Promise<LogoFetchResult | null> {
   const candidates = [
-    { url: clearbitLogoUrl(domain, 256), provider: "clearbit" },
     { url: googleFaviconUrl(domain, 128), provider: "google-s2" },
     { url: duckduckgoIconUrl(domain), provider: "duckduckgo" },
   ];

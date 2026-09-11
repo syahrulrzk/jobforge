@@ -59,7 +59,7 @@ export async function GET(req: NextRequest) {
     jobs: jobs.map((j) => ({
       id: j.id,
       title: j.title,
-      company: j.company ? { id: j.company.id, name: j.company.name, logoUrl: j.company.logoUrl } : null,
+      company: j.company ? { id: j.company.id, name: j.company.name, logoUrl: j.company.logoUrl, website: j.company.website } : null,
       source: j.jobLinks[0]
         ? { slug: j.jobLinks[0].source.slug, name: j.jobLinks[0].source.name, url: j.jobLinks[0].sourceUrl }
         : null,
