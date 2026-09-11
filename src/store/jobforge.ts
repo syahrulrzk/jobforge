@@ -4,6 +4,7 @@ import { create } from "zustand";
 
 export type ViewKey =
   | "overview"
+  | "search"
   | "activity"
   | "jobs"
   | "companies"

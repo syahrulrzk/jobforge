@@ -11,6 +11,9 @@ export async function GET(req: NextRequest) {
   const page = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
   const pageSize = Math.min(100, Math.max(5, parseInt(sp.get("pageSize") ?? "20", 10) || 20));
   const q = sp.get("q")?.trim() ?? "";
+  const title = sp.get("title")?.trim() ?? ""; // position search — word-AND over title/skills
+  const location = sp.get("location")?.trim() ?? "";
+  const remote = sp.get("remote"); // "true" → remote only
   const source = sp.get("source") ?? "";
   const status = sp.get("status") ?? "";
   const company = sp.get("company") ?? "";
@@ -24,6 +27,15 @@ export async function GET(req: NextRequest) {
       { company: { is: { name: { contains: q } } } },
     ];
   }
+  if (title) {
+    // every word must appear somewhere in the title/skills — "react frontend" matches "Frontend Engineer (React)"
+    const words = title.split(/\s+/).filter(Boolean).slice(0, 6);
+    where.AND = words.map((w) => ({
+      OR: [{ title: { contains: w } }, { normalizedTitle: { contains: w } }, { skills: { contains: w } }],
+    }));
+  }
+  if (location) where.location = { contains: location };
+  if (remote === "true") where.workplaceType = "REMOTE";
   if (status) where.status = status;
   if (company) where.companyId = company;
   if (source || date) {
@@ -64,6 +76,7 @@ export async function GET(req: NextRequest) {
         ? { slug: j.jobLinks[0].source.slug, name: j.jobLinks[0].source.name, url: j.jobLinks[0].sourceUrl }
         : null,
       location: j.location,
+      workplaceType: j.workplaceType,
       salaryMin: j.salaryMin,
       salaryMax: j.salaryMax,
       currency: j.currency,

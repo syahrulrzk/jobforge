@@ -144,3 +144,37 @@ Stage Summary:
 - 5-engine pool: Cheerio, Crawlee, Puppeteer, Playwright, Selenium — aktifkan 1/2/bebas via Engine Pool toggle di Sources
 - Source baru Himalayas (playwright) masuk rotasi real data, total 5 sumber live
 - Console error SheetTitle beres di Jobs & Companies detail sheet
+
+---
+Task ID: 10
+Agent: Super Z (main)
+Task: Fitur Cari Lowongan — halaman pencarian job-seeker berdasarkan posisi (user: "buat fitur cari jobs berdasarkan posisi yg kita mau")
+
+Work Log:
+- API /api/jobs: param baru title (word-AND over title/normalizedTitle/skills — "senior frontend" match "Senior Frontend Angular Developer"), location (contains), remote=true (workplaceType REMOTE); response + workplaceType
+- Ekstrak detail sheet dari jobs.tsx (~190 baris) ke src/components/jobforge/job-detail-sheet.tsx (shared: fetch detail, 4 tabs, force-ready override, sr-only SheetTitle saat loading) — jobs.tsx jadi lean (filter + tabel + pagination + <JobDetailSheet/>)
+- NEW src/components/jobforge/search.tsx — SearchView: hero search (input posisi h-11 autofocus + lokasi opsional + tombol Cari + Enter), debounce 350ms search-as-you-type, 8 chip posisi populer, switch "Hanya remote", hasil grid kartu responsif (sm:2 lg:3 xl:4) dengan logo perusahaan, remote badge, salary, source + status badge, timeAgo; reset button, empty state, pagination
+- store/jobforge.ts ViewKey + "search"; shell.tsx: grup NAV baru "Karier" di urutan pertama (Cari Lowongan, icon Search), VIEW_TITLES.search, render SearchView
+- Verified: tsc clean; API tests — frontend developer=83, backend developer=70, data analyst=81, react=84, remote=true=594, Berlin=24, developer+Berlin=2, designer+remote=35 (semua REMOTE), senior frontend=5 (word-AND ✓); GET / 200
+
+Stage Summary:
+- Halaman "Cari Lowongan" (grup Karier, nav pertama): cari posisi by keyword multi-kata + lokasi + filter remote, hasil kartu klik → detail sheet lengkap
+- JobDetailSheet kini shared antara Jobs view & Search view
+
+---
+Task ID: 11
+Agent: Super Z (main)
+Task: Live Scrape Search — mode cari via scraping engine (user: "opsi cari db kita dan cari dari scraping engine")
+
+Work Log:
+- Klarifikasi user: fitur cari harus 2 mode — (1) Cari Database (instan, job existing), (2) Scrape Live: ketik posisi → engine pool jalan scraping on-demand ke semua board → hasil masuk DB → ditampilkan
+- Riset native keyword search per board: Remotive search= ✓ (broad, perlu filter lokal), Jobicy tag= ✓ relevan, RemoteOK tag= (satu kata; fallback kata ke-2), Arbeitnow & Himalayas tidak support → fetch batch + filter lokal
+- sources-real.ts refactor: mapper per-board diekstrak jadi exported (mapRemotiveJob/mapJobicyJob/mapArbeitnowJob/mapRemoteOkJob/mapHimalayasJob) — fetcher terjadwal & live search reuse mapper yang sama
+- NEW src/lib/jobforge/live-search.ts: liveKeywordScrape(q) — 5 board paralel (Promise.all), keyword filter ALL-words di title+skills (sengaja mirror filter /api/jobs title supaya angka report = angka grid), ingest via fingerprint path yang sama dengan engine.ts (dup → link JobSource §15.1, baru → Job SCRAPED), engine dirotasi dari ENGINE_POOL aktif per board, log Activity Console per board dengan nama engine, cap 40/board
+- NEW POST /api/search/live (guard in-flight, min 2 char, maxDuration 60)
+- search.tsx: segmented toggle "Cari Database" / "Scrape Live (Engine)", live mode: tombol Scrape Sekarang + spinner + banner progress, chip posisi trigger live scrape, breakdown chip per board (nama board + badge engine + X baru / Y found / gagal), tombol Scrape ulang; db mode perilaku lama (debounce 350ms)
+- Verified E2E: "business analyst" → 1.4s, found=15 created=7 dup=8, RemoteOK via Selenium 7 baru (fallback tag=business→analyst), engine pool 5-5-nya kepake (cheerio/crawlee/playwright/selenium/puppeteer); grid /api/jobs?title=business analyst = 15 = report ✓; tsc clean; GET / 200
+
+Stage Summary:
+- Dua mode cari: Database (instan) & Scrape Live (engine pool scrape on-demand semua board, hasil tersimpan + dedup + masuk pipeline normal)
+- Report per board menampilkan engine yang menjalankan + jumlah baru/found — konsisten dengan arsitektur 5-engine
