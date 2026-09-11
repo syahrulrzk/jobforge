@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useJobForgeStore, type ViewKey } from "@/store/jobforge";
 import { OverviewView } from "./overview";
+import { ActivityView } from "./activity";
 import { JobsView } from "./jobs";
 import { CompaniesView } from "./companies";
 import { ContactsView } from "./contacts";
@@ -26,11 +27,13 @@ import {
   Send,
   Server,
   Settings2,
+  TerminalSquare,
   Workflow,
 } from "lucide-react";
 
 const NAV: { key: ViewKey; label: string; icon: React.ReactNode; group: string }[] = [
   { key: "overview", label: "Dashboard", icon: <Gauge className="h-4 w-4" />, group: "Monitoring" },
+  { key: "activity", label: "Activity Console", icon: <TerminalSquare className="h-4 w-4" />, group: "Monitoring" },
   { key: "jobs", label: "Jobs", icon: <FileText className="h-4 w-4" />, group: "Data" },
   { key: "companies", label: "Companies", icon: <Building2 className="h-4 w-4" />, group: "Data" },
   { key: "contacts", label: "HR Contacts", icon: <Mail className="h-4 w-4" />, group: "Data" },
@@ -43,6 +46,7 @@ const NAV: { key: ViewKey; label: string; icon: React.ReactNode; group: string }
 
 const VIEW_TITLES: Record<ViewKey, { title: string; sub: string }> = {
   overview: { title: "Dashboard", sub: "Ringkasan pipeline — Collect. Enrich. Deliver." },
+  activity: { title: "Activity Console", sub: "Log terstruktur lengkap seluruh pipeline — filter, streaming, export" },
   jobs: { title: "Jobs", sub: "Semua lowongan hasil scraping dengan status lifecycle" },
   companies: { title: "Companies", sub: "Perusahaan hasil enrichment dan deduplication" },
   contacts: { title: "HR Contacts", sub: "Email HR/recruitment dari sumber publik terverifikasi" },
@@ -196,6 +200,7 @@ export function JobForgeShell() {
         {/* View container */}
         <main className="min-h-0 flex-1 overflow-y-auto p-4 md:p-6">
           {view === "overview" && <OverviewView live={live} />}
+          {view === "activity" && <ActivityView live={live} />}
           {view === "jobs" && <JobsView live={live} />}
           {view === "companies" && <CompaniesView live={live} />}
           {view === "contacts" && <ContactsView live={live} />}

@@ -11,9 +11,10 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Activity, AlertTriangle, Building2, CheckCircle2, FileText, Mail, Rocket, Send, XCircle } from "lucide-react";
+import { Activity, AlertTriangle, ArrowRight, Building2, CheckCircle2, FileText, Mail, Rocket, Send, XCircle } from "lucide-react";
 import { StatCard, StatusBadge, LogActionColor, timeAgo, EmptyState } from "./ui-bits";
 import { useApi } from "@/hooks/use-api";
+import { useJobForgeStore } from "@/store/jobforge";
 import { cn } from "@/lib/utils";
 
 interface DashboardData {
@@ -61,6 +62,7 @@ const PIPELINE_STEPS = [
 
 export function OverviewView({ live }: { live: boolean }) {
   const { data } = useApi<DashboardData>("/api/dashboard", { intervalMs: live ? 4000 : null });
+  const setView = useJobForgeStore((s) => s.setView);
 
   if (!data) return <OverviewSkeleton />;
 
@@ -193,15 +195,20 @@ export function OverviewView({ live }: { live: boolean }) {
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-zinc-200">Activity Console</h3>
-            <span className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+            <button
+              onClick={() => setView("activity")}
+              className="flex items-center gap-1 text-[11px] font-medium text-amber-400 transition-colors hover:text-amber-300"
+              title="Buka full log di Activity Console"
+            >
               {live && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />}
-              structured logs
-            </span>
+              full log
+              <ArrowRight className="h-3 w-3" />
+            </button>
           </div>
           {recentActivity.length === 0 ? (
             <EmptyState title="Belum ada aktivitas" />
           ) : (
-            <div className="max-h-64 space-y-0.5 overflow-y-auto font-mono text-[11px] leading-relaxed [scrollbar-width:thin]">
+            <div className="max-h-64 space-y-0.5 overflow-y-auto font-mono text-[11px] leading-relaxed [scrollbar-width:thin]" onClick={() => setView("activity")}>
               {recentActivity.map((log) => (
                 <div key={log.id} className="flex gap-2 rounded px-1.5 py-1 hover:bg-zinc-800/40">
                   <span className="shrink-0 text-zinc-600">{new Date(log.ts).toLocaleTimeString("id-ID", { hour12: false })}</span>

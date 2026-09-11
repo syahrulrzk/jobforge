@@ -104,10 +104,10 @@ export async function GET() {
     })
     .sort((a, b) => b.jobCount - a.jobCount);
 
-  // recent activity (§26 structured logs)
+  // recent activity (§26 structured logs) — preview for dashboard console
   const recentActivity = await db.activityLog.findMany({
     orderBy: { ts: "desc" },
-    take: 12,
+    take: 30,
   });
 
   // live pipeline counters
