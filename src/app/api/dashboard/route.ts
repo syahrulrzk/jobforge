@@ -107,7 +107,7 @@ export async function GET() {
   // recent activity (§26 structured logs) — preview for dashboard console
   const recentActivity = await db.activityLog.findMany({
     orderBy: { ts: "desc" },
-    take: 30,
+    take: 60,
   });
 
   // live pipeline counters

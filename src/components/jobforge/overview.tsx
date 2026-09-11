@@ -192,7 +192,7 @@ export function OverviewView({ live }: { live: boolean }) {
           </div>
         </div>
 
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+        <div className="flex flex-col rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-zinc-200">Activity Console</h3>
             <button
@@ -208,7 +208,7 @@ export function OverviewView({ live }: { live: boolean }) {
           {recentActivity.length === 0 ? (
             <EmptyState title="Belum ada aktivitas" />
           ) : (
-            <div className="max-h-64 space-y-0.5 overflow-y-auto font-mono text-[11px] leading-relaxed [scrollbar-width:thin]" onClick={() => setView("activity")}>
+            <div className="min-h-56 flex-1 space-y-0.5 overflow-y-auto font-mono text-[11px] leading-relaxed [scrollbar-width:thin]" onClick={() => setView("activity")}>
               {recentActivity.map((log) => (
                 <div key={log.id} className="flex gap-2 rounded px-1.5 py-1 hover:bg-zinc-800/40">
                   <span className="shrink-0 text-zinc-600">{new Date(log.ts).toLocaleTimeString("id-ID", { hour12: false })}</span>

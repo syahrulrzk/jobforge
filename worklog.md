@@ -14,3 +14,16 @@ Stage Summary:
 - Full logs now accessible via sidebar "Activity Console" (Monitoring group)
 - API verified: default 200/806 logs, action=error 13, q=scrape 97, status=failed 15 — all filters OK
 - tsc clean for changed files (remaining errors are pre-existing in examples/, skills/, engine.ts:460)
+---
+Task ID: 2
+Agent: Super Z (main)
+Task: Dashboard Activity Console CARD not filling its height (user screenshot)
+
+Work Log:
+- Root cause: grid stretches card to Sources Health height, but log list capped max-h-64 → dead empty space below logs
+- overview.tsx: card → flex flex-col, log container max-h-64 → min-h-56 flex-1 (fills full card height, scrolls when longer)
+- /api/dashboard: recentActivity take 30→60 so the taller console always has content
+- Verified: tsc clean, /api/dashboard returns 60 logs, page HTTP 200
+
+Stage Summary:
+- Activity Console card on dashboard now fills entire card height (no dead space), 60-log buffer, click still jumps to full console
