@@ -158,5 +158,5 @@ export const SETTING_KEYS = {
   tickIntervalMs: "TICK_INTERVAL_MS",
   demoJobCap: "DEMO_JOB_CAP",
   dataMode: "DATA_MODE", // real | mock — live public job APIs vs simulation generator
-  enginePool: "ENGINE_POOL", // CSV of active engines: cheerio,crawlee,puppeteer,selenium
+  enginePool: "ENGINE_POOL", // CSV of active engines: cheerio,crawlee,puppeteer,playwright,selenium
 } as const;

@@ -419,6 +419,10 @@ export function JobsView({ live }: { live: boolean }) {
             </div>
           ) : (
             <div className="space-y-3 p-6">
+              {/* a11y: Radix Dialog requires a Title even while detail is loading */}
+              <SheetHeader className="sr-only">
+                <SheetTitle>Detail Job</SheetTitle>
+              </SheetHeader>
               <div className="h-6 w-2/3 animate-pulse rounded bg-zinc-800" />
               <div className="h-4 w-1/3 animate-pulse rounded bg-zinc-800" />
               <div className="h-40 animate-pulse rounded bg-zinc-800/60" />

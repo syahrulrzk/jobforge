@@ -10,6 +10,7 @@
 //   jobicy      https://jobicy.com/api/v2/remote-jobs       logo ✓ structured salary
 //   arbeitnow   https://www.arbeitnow.com/api/job-board-api logo ✗ (enrichment fills it)
 //   remoteok    https://remoteok.com/api                    logo ~ partial
+//   himalayas   https://himalayas.app/jobs/api              logo ✓ salary structured
 //
 // HR emails are NOT exposed by these boards — per §12.4 the pipeline
 // never guesses: such jobs land in NEEDS_ENRICHMENT and the recovery
@@ -220,11 +221,53 @@ async function fetchRemoteOk(): Promise<ScrapeResult> {
   return { records, pagesScraped: 1, errors: [] };
 }
 
+// ── Himalayas ───────────────────────────────────────────────
+async function fetchHimalayas(): Promise<ScrapeResult> {
+  const data = (await getJson("https://himalayas.app/jobs/api?limit=30")) as { jobs?: Record<string, unknown>[] };
+  const records: RawJobRecord[] = [];
+  for (const j of data.jobs ?? []) {
+    const title = clean(j.title);
+    const company = clean(j.companyName);
+    const url = clean(j.applicationLink) ?? clean(j.guid);
+    if (!title || !company || !url) continue;
+    const salaryText =
+      j.minSalary && j.maxSalary
+        ? `${String(j.currency ?? "USD")} ${Number(j.minSalary).toLocaleString("en-US")} - ${Number(j.maxSalary).toLocaleString("en-US")} per ${String(j.salaryPeriod ?? "year")}`
+        : null;
+    // pubDate is epoch SECONDS — isoDate expects ms
+    const pubDate = typeof j.pubDate === "number" ? j.pubDate * 1000 : j.pubDate;
+    const locs = Array.isArray(j.locationRestrictions) ? j.locationRestrictions.map(String) : [];
+    const cats = Array.isArray(j.categories) ? j.categories.map(String).slice(0, 4) : [];
+    records.push({
+      sourcePlatform: "himalayas",
+      sourceJobId: `him-${String(j.guid ?? url).split("/").filter(Boolean).pop() ?? url}`.slice(0, 120),
+      sourceUrl: url,
+      rawTitle: title,
+      rawCompanyName: company,
+      rawCompanyLogoUrl: clean(j.companyLogo) ?? null,
+      rawCompanyWebsite: null,
+      rawCompanyProfile: null,
+      rawDescription: stripHtml(String(j.description ?? j.excerpt ?? "")) || null,
+      rawSalaryText: salaryText,
+      rawLocation: locs.length > 0 ? clean(locs.slice(0, 3).join(", ")) ?? "Remote — Worldwide" : "Remote — Worldwide",
+      rawEmploymentType: mapEmployment(String(j.employmentType ?? "")),
+      rawWorkplaceType: "REMOTE",
+      rawRequirements: Array.isArray(j.seniority) ? j.seniority.map((s) => String(s)).slice(0, 3) : [],
+      rawSkills: cats.map((c) => c.replace(/-/g, " ")),
+      careerPageUrl: url,
+      publishedEmail: null,
+      scrapedAt: isoDate(pubDate),
+    });
+  }
+  return { records, pagesScraped: 1, errors: [] };
+}
+
 export const REAL_BOARDS: Record<string, (() => Promise<ScrapeResult>) | undefined> = {
   remotive: fetchRemotive,
   jobicy: fetchJobicy,
   arbeitnow: fetchArbeitnow,
   remoteok: fetchRemoteOk,
+  himalayas: fetchHimalayas,
 };
 
 export function realBoardError(sourceName: string, err: unknown): { type: ErrorType; message: string } {

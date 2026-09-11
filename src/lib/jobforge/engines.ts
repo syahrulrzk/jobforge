@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────
 // JOBFORCE — Scraping Engine Registry (PRD §9.2 engine pool)
 //
-// Four interchangeable scraper engines. Every engine implements the
+// Five interchangeable scraper engines. Every engine implements the
 // same contract: given a source profile, fetch listing payloads and
 // emit RawJobRecord[] (via the shared real-source fetchers or the
 // simulation adapter). Engines differ in execution profile:
@@ -9,16 +9,17 @@
 //   cheerio    — STATIC: plain HTTP GET + DOM parsing (fast, no browser)
 //   crawlee    — Crawlee framework run (auto-throttling, retries, real HTTP)
 //   puppeteer  — headless Chromium (renders JS-heavy SPA listings)
+//   playwright — multi-browser automation (Chromium/Firefox/WebKit, auto-wait)
 //   selenium   — Selenium WebDriver grid (legacy browser automation)
 //
 // The ENGINE_POOL setting controls which engines are active — run with
-// one engine, a subset (e.g. 2), or all four at once. Runs rotate over
+// one engine, a subset (e.g. 2), or all five at once. Runs rotate over
 // the active pool; a failing engine is skipped on the next rotation
 // (failover). Sources can pin a preferred engine; if that engine is
 // not in the active pool the run falls back to pool rotation.
 // ─────────────────────────────────────────────────────────────
 
-export type EngineKey = "cheerio" | "crawlee" | "puppeteer" | "selenium";
+export type EngineKey = "cheerio" | "crawlee" | "puppeteer" | "playwright" | "selenium";
 
 export interface EngineMeta {
   key: EngineKey;
@@ -73,6 +74,18 @@ export const ENGINES: Record<EngineKey, EngineMeta> = {
     memoryMb: 384,
     badge: "bg-violet-500/10 text-violet-300 border-violet-500/30",
     dot: "bg-violet-400",
+  },
+  playwright: {
+    key: "playwright",
+    name: "Playwright",
+    tech: "Chromium · Firefox · WebKit",
+    kind: "browser",
+    description: "Automasi multi-browser dengan auto-wait & network interception — andal untuk SPA berat.",
+    latencyMs: [700, 2200],
+    failureRate: 0.05,
+    memoryMb: 400,
+    badge: "bg-fuchsia-500/10 text-fuchsia-300 border-fuchsia-500/30",
+    dot: "bg-fuchsia-400",
   },
   selenium: {
     key: "selenium",

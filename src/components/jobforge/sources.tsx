@@ -66,7 +66,7 @@ export function SourcesView({ live }: { live: boolean }) {
   const [poolBusy, setPoolBusy] = useState(false);
 
   const activePool = useMemo(() => {
-    const raw = settingsData?.settings.enginePool ?? "cheerio,crawlee,puppeteer,selenium";
+    const raw = settingsData?.settings.enginePool ?? "cheerio,crawlee,puppeteer,playwright,selenium";
     return raw.split(",").map((k) => k.trim()) as EngineKey[];
   }, [settingsData]);
 
@@ -191,7 +191,7 @@ export function SourcesView({ live }: { live: boolean }) {
             Run dirotasi ke engine aktif — source dengan engine di luar pool otomatis failover
           </p>
         </div>
-        <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           {ENGINE_KEYS.map((key) => {
             const meta = ENGINES[key];
             const active = activePool.includes(key);

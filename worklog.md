@@ -123,3 +123,24 @@ Stage Summary:
 - REAL data mode default: live jobs from 4 public boards flow through the full pipeline (normalize → enrich → validate → dedup → deliver)
 - 4-engine pool works: pilih 1/2/4 engine via Engine Pool toggles; per-source engine pin + failover rotation
 - Real jobs w/o published HR email land in NEEDS_ENRICHMENT (honest §12.4); recovery worker does real mailto scans; operator can Force READY
+
+---
+Task ID: 9
+Agent: Super Z (main)
+Task: Fix Radix SheetTitle a11y warning + tambah Playwright sebagai engine ke-5 (user: "1 lagi mana playwright ya?")
+
+Work Log:
+- Root cause console error: detail Sheet di jobs.tsx & companies.tsx — loading branch (detail == null) tidak punya SheetTitle → Radix Dialog warning. Fix: SheetHeader sr-only + SheetTitle di kedua loading branch
+- engines.ts: EngineKey + "playwright", meta baru (Chromium/Firefox/WebKit, browser, 700-2200ms, fail 5%, 400MB, badge fuchsia), header comment 4→5 engines
+- sources-real.ts: fetchHimalayas() — himalayas.app/jobs/api (limit 30, logo CDN ✓, salary structured min/max/period, pubDate epoch detik ×1000, locationRestrictions → location, categories → skills) + REAL_BOARDS.himalayas
+- api/settings/route.ts: default enginePool & validasi PUT sekarang pakai DEFAULT_ENGINE_POOL/ENGINE_KEYS dari registry (single source of truth, bukan hard-coded CSV)
+- sources.tsx: fallback pool string + grid panel 5 kartu (sm:2 lg:3 xl:5)
+- schema.prisma: komentar engine + playwright (String, tidak perlu db push)
+- scripts/migrate-playwright-engine.ts: upsert source himalayas (pin engine playwright, hourly) + ENGINE_POOL=cheerio,crawlee,puppeteer,playwright,selenium — run OK
+- INSIDEN: tick loop dev-server lama (kode pre-hot-reload) sempat bikin 54 job MOCK via source himalayas (REAL_BOARDS lama tak kenal himalayas → fallback mock generator, nama "PT DANA Indonesia" dkk) → 54 job mock dihapus (cascade JobSource/JobContact), 20 job real aman; dev server direstart pake ./node_modules/.bin/next dev -p 3000 (npm exec + nohup merusak parsing -p)
+- Verified E2E: run paksa Himalayas → engine=playwright SUCCESS (found 20, created 20, err 0); Jobicy[puppeteer] & RemoteOK[selenium] recovered dari ERROR → ACTIVE; 5 source ACTIVE masing-masing pin engine beda (cheerio/crawlee/puppeteer/playwright/selenium); pool setting 5 engine; job real himalayas dgn company mapping + logo (micro1, Nexii, Upstream USA, GXO) masuk NEEDS_ENRICHMENT sesuai §12.4; tsc clean; GET / 200
+
+Stage Summary:
+- 5-engine pool: Cheerio, Crawlee, Puppeteer, Playwright, Selenium — aktifkan 1/2/bebas via Engine Pool toggle di Sources
+- Source baru Himalayas (playwright) masuk rotasi real data, total 5 sumber live
+- Console error SheetTitle beres di Jobs & Companies detail sheet

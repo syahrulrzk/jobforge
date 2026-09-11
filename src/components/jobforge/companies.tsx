@@ -196,6 +196,10 @@ export function CompaniesView({ live }: { live: boolean }) {
             </div>
           ) : (
             <div className="space-y-3 p-6">
+              {/* a11y: Radix Dialog requires a Title even while detail is loading */}
+              <SheetHeader className="sr-only">
+                <SheetTitle>Detail Perusahaan</SheetTitle>
+              </SheetHeader>
               <div className="h-8 w-1/2 animate-pulse rounded bg-zinc-800" />
               <div className="h-24 animate-pulse rounded bg-zinc-800/60" />
             </div>

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { ensureBootstrap } from "@/lib/jobforge/bootstrap";
 import { SETTING_KEYS } from "@/lib/jobforge/types";
+import { DEFAULT_ENGINE_POOL, ENGINE_KEYS } from "@/lib/jobforge/engines";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +26,7 @@ export async function GET() {
       tickIntervalMs: map[SETTING_KEYS.tickIntervalMs] ?? "5000",
       demoJobCap: map[SETTING_KEYS.demoJobCap] ?? "800",
       dataMode: map[SETTING_KEYS.dataMode] ?? "real",
-      enginePool: map[SETTING_KEYS.enginePool] ?? "cheerio,crawlee,puppeteer,selenium",
+      enginePool: map[SETTING_KEYS.enginePool] ?? DEFAULT_ENGINE_POOL.join(","),
     },
   });
 }
@@ -51,12 +52,11 @@ export async function PUT(req: NextRequest) {
   if (b.demoJobCap !== undefined) updates.push([SETTING_KEYS.demoJobCap, String(Math.min(5000, Math.max(100, parseInt(String(b.demoJobCap), 10) || 800)))]);
   if (b.dataMode !== undefined) updates.push([SETTING_KEYS.dataMode, b.dataMode === "mock" ? "mock" : "real"]);
   if (b.enginePool !== undefined) {
-    const valid = ["cheerio", "crawlee", "puppeteer", "selenium"];
     const requested = String(b.enginePool)
       .split(",")
       .map((k) => k.trim().toLowerCase())
-      .filter((k) => valid.includes(k));
-    updates.push([SETTING_KEYS.enginePool, requested.length > 0 ? requested.join(",") : valid.join(",")]);
+      .filter((k) => (ENGINE_KEYS as string[]).includes(k));
+    updates.push([SETTING_KEYS.enginePool, requested.length > 0 ? requested.join(",") : DEFAULT_ENGINE_POOL.join(",")]);
   }
 
   for (const [key, value] of updates) {
