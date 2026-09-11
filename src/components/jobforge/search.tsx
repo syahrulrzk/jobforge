@@ -20,7 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { BriefcaseBusiness, ChevronLeft, ChevronRight, Database, Globe, Layers, Loader2, MapPin, Search, Zap } from "lucide-react";
+import { AlertTriangle, BriefcaseBusiness, ChevronLeft, ChevronRight, Database, Globe, Layers, Loader2, MapPin, Search, Zap } from "lucide-react";
 import { CompanyAvatar, EmptyState, StatusBadge, formatIDR, timeAgo } from "./ui-bits";
 import { JobDetailSheet } from "./job-detail-sheet";
 import { ENGINES, type EngineKey } from "@/lib/jobforge/engines";
@@ -464,6 +464,24 @@ export function SearchView() {
                 );
               })}
             </div>
+            {/* Alasan gagal ditulis LANGSUNG di sini — bukan cuma di tooltip */}
+            {liveResult.boards.some((b) => b.status === "failed" && b.error) && (
+              <div className="space-y-1.5 rounded-lg border border-rose-500/20 bg-rose-500/5 px-3 py-2">
+                {liveResult.boards
+                  .filter((b) => b.status === "failed" && b.error)
+                  .map((b) => (
+                    <p key={b.slug} className="flex items-start gap-1.5 text-[11px] leading-relaxed text-rose-300">
+                      <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                      <span>
+                        <span className="font-semibold">{b.board}</span> — {b.error}
+                      </span>
+                    </p>
+                  ))}
+                <p className="text-[11px] leading-relaxed text-zinc-500">
+                  Portal yang memblokir scraper anonim butuh akses resmi atau proxy — board publik lain tetap bisa dipakai untuk mencari.
+                </p>
+              </div>
+            )}
           </div>
         )}
       </section>

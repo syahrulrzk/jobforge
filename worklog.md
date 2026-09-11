@@ -272,3 +272,19 @@ Stage Summary:
 - Search live sekarang JUJUR & TRANSPARAN per engine: source 5 engine → 5 engine kecoba satu-satu (nyata), hasil per-engine kelihatan di chip (badge dicoret = gagal, warna = sukses), detail HTTP/durasi di tooltip
 - JobStreet terbukti diblokir Datadome di semua 5 engine (403) — jelas bagi user bahwa bukan engine-nya yang salah, tapi situsnya yang nge-block scraper anonim
 - DB snapshot hilang karena sandbox restart sudah dipulihkan + setting 5-engine JobStreet dikembalikan
+
+---
+Task ID: 16
+Agent: Super Z (main)
+Task: Fokus JobStreet saja — hapus ulang board internasional (user kesal di-add ulang), jawab "kenapa gagal" dengan bukti + tampilkan alasan gagal langsung di UI
+
+Work Log:
+- User hapus 5 board internasional via UI, tapi migrasi recovery Task 15 meng-add ulang → user kesal ("yg lain udh gw hapus knpa lu add lagi sh"). Cleanup: hapus remotive/jobicy/arbeitnow/remoteok/himalayas + 342 job linked + 54 company orphan. DB sekarang = JobStreet[ACTIVE, 5 engine] + Glints/Indeed/Kalibrr/Karir.com[INACTIVE], 0 job
+- Probe definitif scripts/probe-jobstreet.py — 7 jalur: root (UA bot/browser+full headers/Googlebot), /id/jobs, xapi.jobstreet.co.id (DNS tak resolve publik), sitemap.xml, robots.txt → SEMUA 403 (server: cloudflare, Datadome/Seek). Bahkan robots.txt diblokir = blanket edge block utk IP datacenter. Kesimpulan: scraping anonim JobStreet mustahil tanpa proxy residensial (berbayar) atau API resmi Seek
+- search.tsx: alasan gagal board sekarang TAMPIL LANGSUNG di bawah chip hasil (panel rose dgn AlertTriangle per board + pesan error lengkap + hint "butuh akses resmi/proxy — board publik lain tetap bisa dipakai"), tidak bergantung hover tooltip
+- Verified: tsc clean; GET / 200; live search jobstreet → 5 attempt, error jujur tampil
+
+Stage Summary:
+- Data sources = persis sesuai user: JobStreet + 4 portal ID (INACTIVE), tanpa board internasional
+- Kenapa gagal terjawab dengan bukti empiris 7 jalur + tampil inline di UI search
+- Keputusan terbuka utk user: (A) integrasi nyata portal ID yg bisa di-scrape anonim (Kalibrr/Glints/Karir.com) — gratis; (B) proxy residensial/API resmi utk JobStreet — butuh layanan/kredensial
