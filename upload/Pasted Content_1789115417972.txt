@@ -1,0 +1,1701 @@
+# JobForge — Product Requirements Document (PRD)
+
+**Version:** 1.0  
+**Status:** Final  
+**Product:** JobForge  
+**Tagline:** Collect. Enrich. Deliver.  
+**Document Type:** Product Requirements Document
+
+---
+
+## 1. Product Overview
+
+**JobForge** adalah Job Scraping & Aggregation Engine yang mengumpulkan lowongan pekerjaan dari berbagai sumber publik, menormalisasi data, melakukan company enrichment dan HR/recruitment email discovery, melakukan validasi serta deduplikasi, kemudian mengirimkan data lowongan yang valid ke Job Portal melalui REST API.
+
+JobForge bukan sekadar scraper. JobForge dirancang sebagai **data ingestion pipeline** yang dapat menangani banyak sumber, banyak worker, scheduling, monitoring, dan integrasi dengan Job Portal.
+
+### Core Flow
+
+```text
+Job Sources
+    ↓
+Scraper
+    ↓
+Parser
+    ↓
+Normalizer
+    ↓
+Company Enrichment
+    ↓
+HR Email Discovery
+    ↓
+Validation
+    ↓
+Deduplication
+    ↓
+PostgreSQL
+    ↓
+Job Portal API
+    ↓
+Job Portal
+    ↓
+User Apply
+```
+
+---
+
+# 2. Product Goals
+
+## 2.1 Primary Goals
+
+JobForge harus mampu:
+
+1. Mengambil lowongan dari berbagai job source.
+2. Mengambil informasi perusahaan.
+3. Mengambil logo perusahaan berdasarkan URL.
+4. Mengambil company profile.
+5. Mengambil nama posisi.
+6. Mengambil deskripsi/tanggung jawab pekerjaan.
+7. Mengambil salary jika tersedia.
+8. Mendapatkan email HR/recruitment yang dipublikasikan dan dapat diverifikasi.
+9. Menyimpan source platform dan original job URL.
+10. Melakukan normalisasi data antar-source.
+11. Mendeteksi duplicate job.
+12. Menyimpan histori proses scraping.
+13. Mengirim data valid ke Job Portal melalui API.
+14. Menyediakan dashboard monitoring berbasis SvelteKit.
+15. Menyediakan architecture yang mudah ditambah source baru.
+
+## 2.2 Non-Goals
+
+JobForge tidak bertujuan untuk:
+
+- Bypass CAPTCHA.
+- Bypass authentication.
+- Bypass access control.
+- Mengambil data private.
+- Mengambil credential pengguna.
+- Menebak email pribadi recruiter.
+- Melakukan automated application ke pihak ketiga tanpa dukungan/API/izin yang sesuai.
+
+---
+
+# 3. Target Users
+
+## 3.1 Admin
+
+Mengelola:
+
+- Scraper source.
+- Schedule.
+- Scraping run.
+- Job data.
+- Company data.
+- HR contacts.
+- API integration.
+- Error dan monitoring.
+
+## 3.2 System / Automation
+
+JobForge secara otomatis:
+
+- Menjalankan scraper.
+- Memproses hasil scraping.
+- Melakukan enrichment.
+- Validasi.
+- Deduplication.
+- Delivery ke Job Portal.
+
+## 3.3 Job Portal User
+
+User akhir tidak berinteraksi langsung dengan scraper.
+
+User menggunakan Job Portal untuk:
+
+- Search job.
+- Melihat detail perusahaan.
+- Melihat detail pekerjaan.
+- Apply melalui mekanisme yang disediakan Job Portal.
+
+---
+
+# 4. Technology Stack
+
+## 4.1 Mandatory Stack
+
+| Component | Technology |
+|---|---|
+| Runtime | Bun |
+| Language | TypeScript |
+| Dashboard | SvelteKit |
+| Backend/API | Bun + TypeScript |
+| Browser Automation | Playwright |
+| HTML Parser | Cheerio |
+| Validation | Zod |
+| Database | PostgreSQL |
+| ORM | Prisma |
+| Queue | Redis + BullMQ |
+| Container | Docker |
+| Reverse Proxy | Nginx |
+
+Tidak menggunakan Python sebagai bagian dari core application.
+
+---
+
+# 5. High-Level Architecture
+
+```text
+                         ┌───────────────────┐
+                         │    Job Sources    │
+                         │                   │
+                         │ Job Portal        │
+                         │ Career Websites   │
+                         │ Public Sources   │
+                         └─────────┬─────────┘
+                                   │
+                                   ▼
+                         ┌───────────────────┐
+                         │    Scheduler      │
+                         └─────────┬─────────┘
+                                   │
+                                   ▼
+                         ┌───────────────────┐
+                         │   Redis / Queue   │
+                         └─────────┬─────────┘
+                                   │
+                  ┌────────────────┼────────────────┐
+                  ▼                ▼                ▼
+             Scraper #1       Scraper #2       Scraper #N
+                  │                │                │
+                  └────────────────┼────────────────┘
+                                   ▼
+                         ┌───────────────────┐
+                         │     Parser        │
+                         └─────────┬─────────┘
+                                   ▼
+                         ┌───────────────────┐
+                         │    Normalizer     │
+                         └─────────┬─────────┘
+                                   ▼
+                         ┌───────────────────┐
+                         │ Company Enrichment│
+                         └─────────┬─────────┘
+                                   ▼
+                         ┌───────────────────┐
+                         │ HR Email Discovery│
+                         └─────────┬─────────┘
+                                   ▼
+                         ┌───────────────────┐
+                         │    Validator      │
+                         └─────────┬─────────┘
+                                   ▼
+                         ┌───────────────────┐
+                         │  Deduplication    │
+                         └─────────┬─────────┘
+                                   ▼
+                         ┌───────────────────┐
+                         │    PostgreSQL     │
+                         └─────────┬─────────┘
+                                   │
+                                   ▼
+                         ┌───────────────────┐
+                         │  Portal API       │
+                         └─────────┬─────────┘
+                                   ▼
+                         ┌───────────────────┐
+                         │    Job Portal     │
+                         └───────────────────┘
+
+                 ┌──────────────────────────────┐
+                 │ SvelteKit Admin Dashboard   │
+                 └──────────────┬───────────────┘
+                                │
+                                ▼
+                           JobForge API
+```
+
+---
+
+# 6. Core Data Requirements
+
+## 6.1 Mandatory Fields
+
+| Field | Required | Description |
+|---|---:|---|
+| Company Name | Yes | Nama perusahaan |
+| Company Logo URL | Yes | URL logo perusahaan |
+| Company Profile | Yes | Profil/deskripsi perusahaan |
+| Job Title | Yes | Nama posisi |
+| Job Description | Yes | Deskripsi/tanggung jawab |
+| HR Email | **Yes** | Email HR/recruitment yang dipublikasikan |
+| Source Platform | **Yes** | Sumber lowongan |
+| Source URL | **Yes** | URL original lowongan |
+| Scraped At | Yes | Waktu scraping |
+| Salary | No | Gaji jika tersedia |
+
+Job yang tidak memenuhi mandatory field tidak boleh berstatus `READY`.
+
+---
+
+# 7. Canonical Job Schema
+
+Format canonical digunakan sebagai standar internal dan payload API.
+
+```json
+{
+  "source": {
+    "platform": "jobstreet",
+    "job_id": "87456321",
+    "url": "https://www.jobstreet.co.id/job/87456321"
+  },
+  "company": {
+    "name": "PT Sinar Digital Indonesia",
+    "logo_url": "https://www.sinardigital.co.id/assets/logo.png",
+    "website": "https://www.sinardigital.co.id",
+    "profile": "Perusahaan yang bergerak di bidang teknologi informasi."
+  },
+  "job": {
+    "title": "Backend Developer",
+    "description": "Bertanggung jawab mengembangkan backend application dan REST API.",
+    "salary": {
+      "min": 8000000,
+      "max": 12000000,
+      "currency": "IDR"
+    },
+    "location": "Jakarta Selatan",
+    "employment_type": "FULL_TIME",
+    "workplace_type": "ONSITE",
+    "requirements": [
+      "Minimal 2 tahun pengalaman",
+      "Menguasai Node.js",
+      "Menguasai PostgreSQL"
+    ],
+    "skills": [
+      "Node.js",
+      "TypeScript",
+      "PostgreSQL"
+    ]
+  },
+  "contact": {
+    "hr_email": "career@sinardigital.co.id",
+    "email_source": "https://www.sinardigital.co.id/career",
+    "email_verified": true
+  },
+  "metadata": {
+    "scraped_at": "2026-09-10T14:50:00+07:00"
+  }
+}
+```
+
+Jika salary tidak tersedia:
+
+```json
+"salary": null
+```
+
+Jangan menggunakan `0` untuk salary yang tidak diketahui.
+
+---
+
+# 8. Source Management
+
+JobForge menggunakan konsep **Source Adapter**.
+
+Contoh source:
+
+```text
+JobStreet
+Glints
+Indeed
+Kalibrr
+Karir.com
+Dealls
+Company Career Website
+```
+
+Daftar source harus configurable.
+
+## Source Fields
+
+```text
+source_id
+name
+base_url
+type
+status
+scraper_type
+schedule
+created_at
+updated_at
+```
+
+## Source Status
+
+```text
+ACTIVE
+INACTIVE
+ERROR
+```
+
+## Scraper Type
+
+```text
+STATIC
+DYNAMIC
+API
+```
+
+---
+
+# 9. Scraper Adapter Architecture
+
+Setiap source memiliki adapter sendiri.
+
+```text
+src/adapters/
+
+├── jobstreet/
+│   ├── scraper.ts
+│   ├── parser.ts
+│   └── mapper.ts
+│
+├── glints/
+│   ├── scraper.ts
+│   ├── parser.ts
+│   └── mapper.ts
+│
+└── indeed/
+    ├── scraper.ts
+    ├── parser.ts
+    └── mapper.ts
+```
+
+Core engine tidak boleh bergantung pada struktur HTML source tertentu.
+
+Penambahan source baru harus dapat dilakukan dengan membuat adapter baru tanpa mengubah core pipeline.
+
+---
+
+# 10. Scraping Engine
+
+## 10.1 Static Scraping
+
+Untuk halaman yang HTML-nya sudah tersedia:
+
+```text
+HTTP Request
+    ↓
+HTML
+    ↓
+Cheerio
+    ↓
+Parser
+```
+
+## 10.2 Dynamic Scraping
+
+Untuk website yang membutuhkan JavaScript rendering:
+
+```text
+Playwright
+    ↓
+Browser
+    ↓
+Page
+    ↓
+Rendered HTML
+    ↓
+Parser
+```
+
+## 10.3 Pagination
+
+Engine harus mendukung:
+
+- Page parameter.
+- Next page.
+- Load more.
+- Infinite scroll jika memang diperlukan.
+
+## 10.4 Request Control
+
+Engine wajib memiliki:
+
+- Timeout.
+- Retry.
+- Concurrency limit.
+- Request delay.
+- Error handling.
+
+---
+
+# 11. Company Enrichment
+
+Setelah job diperoleh, JobForge dapat melakukan enrichment terhadap perusahaan.
+
+Flow:
+
+```text
+Job
+ ↓
+Company
+ ↓
+Company Website
+ ↓
+Career Page
+ ↓
+Contact Page
+ ↓
+Public Recruitment Information
+```
+
+Data:
+
+```text
+company.name
+company.logo_url
+company.website
+company.profile
+company.industry
+```
+
+Company harus dideduplicate sehingga satu perusahaan tidak dibuat berulang kali.
+
+---
+
+# 12. HR Email Discovery
+
+## 12.1 Requirement
+
+`hr_email` adalah **mandatory field untuk job yang akan berstatus READY/SENT**.
+
+## 12.2 Priority
+
+Sistem memprioritaskan email recruitment/career yang dipublikasikan, misalnya:
+
+```text
+recruitment@company.com
+career@company.com
+hr@company.com
+hrd@company.com
+talent@company.com
+jobs@company.com
+```
+
+## 12.3 Email Source
+
+Setiap email harus menyimpan:
+
+```text
+hr_email
+email_source_url
+email_verified
+email_status
+```
+
+## 12.4 Tidak Menebak Email
+
+JobForge tidak boleh membuat email berdasarkan pola nama, misalnya:
+
+```text
+firstname.lastname@company.com
+```
+
+jika alamat tersebut tidak dipublikasikan atau diverifikasi.
+
+JobForge juga tidak ditujukan untuk mengumpulkan email pribadi yang tidak dipublikasikan untuk kepentingan recruitment.
+
+---
+
+# 13. Email Validation
+
+Validasi minimal:
+
+```text
+Syntax Validation
+        ↓
+Domain Validation
+        ↓
+MX Validation
+        ↓
+Optional SMTP Verification
+```
+
+Status:
+
+```text
+VALID
+INVALID
+UNKNOWN
+```
+
+Email yang tidak dapat diverifikasi dapat masuk:
+
+```text
+NEEDS_ENRICHMENT
+```
+
+dan tidak boleh menjadi `READY` jika requirement HR email belum terpenuhi.
+
+---
+
+# 14. Data Normalization
+
+Setiap source memiliki struktur berbeda.
+
+JobForge harus mengubah seluruh data menjadi canonical format.
+
+Contoh:
+
+```text
+JobStreet ──┐
+Glints ─────┤
+Indeed ─────┼──→ Canonical Job
+Kalibrr ────┤
+Career Site ┘
+```
+
+Normalisasi meliputi:
+
+- Company name.
+- Job title.
+- Location.
+- Employment type.
+- Workplace type.
+- Salary.
+- Skills.
+- Requirements.
+- Date/time.
+- Description.
+
+---
+
+# 15. Deduplication
+
+## 15.1 Job Deduplication
+
+JobForge harus mendeteksi job yang sama walaupun berasal dari source berbeda.
+
+Contoh:
+
+```text
+JobStreet:
+Backend Developer - PT ABC
+
+Glints:
+Backend Developer - PT ABC
+
+Company Website:
+Backend Developer - PT ABC
+```
+
+Sistem menghasilkan fingerprint berdasarkan data ter-normalisasi.
+
+Contoh:
+
+```text
+normalized_company
++
+normalized_title
++
+normalized_location
+```
+
+Kemudian:
+
+```text
+SHA256(fingerprint)
+```
+
+## 15.2 Source Identity
+
+Selain fingerprint global, simpan:
+
+```text
+source_platform
+source_job_id
+source_url
+```
+
+## 15.3 Company Deduplication
+
+Prioritas identity:
+
+```text
+Company Website / Domain
+        ↓
+Normalized Company Name
+        ↓
+Other company identifiers
+```
+
+---
+
+# 16. Job Lifecycle
+
+```text
+SCRAPED
+   ↓
+PROCESSING
+   ↓
+ENRICHING
+   ↓
+VALIDATING
+   ↓
+READY
+   ↓
+SENT
+   ↓
+PUBLISHED
+```
+
+Failure states:
+
+```text
+FAILED
+REJECTED
+NEEDS_ENRICHMENT
+```
+
+---
+
+# 17. Validation Rules
+
+Job dapat berstatus `READY` apabila:
+
+```text
+Company Name       ✓
+Company Logo URL   ✓
+Company Profile    ✓
+Job Title          ✓
+Job Description    ✓
+HR Email           ✓
+Source Platform    ✓
+Source URL         ✓
+```
+
+Salary tidak wajib.
+
+Jika mandatory data hilang:
+
+```text
+NEEDS_ENRICHMENT
+```
+
+atau:
+
+```text
+REJECTED
+```
+
+sesuai error/quality rule.
+
+---
+
+# 18. PostgreSQL Data Model
+
+Entity utama:
+
+```text
+sources
+companies
+jobs
+job_sources
+job_contacts
+scrape_runs
+scrape_errors
+api_deliveries
+```
+
+Relasi:
+
+```text
+sources
+   │
+   └── job_sources
+            │
+            ▼
+           jobs
+            │
+            ▼
+         companies
+            │
+            ▼
+       job_contacts
+
+sources
+   │
+   └── scrape_runs
+            │
+            └── scrape_errors
+
+jobs
+   │
+   └── api_deliveries
+```
+
+---
+
+# 19. API Integration
+
+JobForge mengirim job ke Job Portal menggunakan REST API.
+
+## Endpoint
+
+```http
+POST /api/v1/jobs/import
+```
+
+## Headers
+
+```http
+Authorization: Bearer <API_KEY>
+Content-Type: application/json
+```
+
+## Bulk Payload
+
+```json
+{
+  "source": "jobstreet",
+  "scraped_at": "2026-09-10T14:50:00+07:00",
+  "jobs": [
+    {
+      "source": {
+        "platform": "jobstreet",
+        "job_id": "12345",
+        "url": "https://example.com/job/12345"
+      },
+      "company": {
+        "name": "PT ABC Indonesia",
+        "logo_url": "https://abc.co.id/logo.png",
+        "profile": "Perusahaan teknologi."
+      },
+      "job": {
+        "title": "IT Support",
+        "description": "Bertanggung jawab atas support sistem.",
+        "salary": null
+      },
+      "contact": {
+        "hr_email": "career@abc.co.id",
+        "email_source": "https://abc.co.id/career",
+        "email_verified": true
+      }
+    }
+  ]
+}
+```
+
+## API Response
+
+```json
+{
+  "success": true,
+  "message": "Jobs imported successfully",
+  "data": {
+    "received": 100,
+    "created": 72,
+    "updated": 18,
+    "duplicated": 10,
+    "failed": 0
+  }
+}
+```
+
+Recommended batch size:
+
+```text
+50–500 jobs/request
+```
+
+Nilai final dapat dikonfigurasi berdasarkan kapasitas API.
+
+---
+
+# 20. API Delivery
+
+Setiap delivery harus dicatat.
+
+Fields:
+
+```text
+delivery_id
+job_id
+endpoint
+request_id
+attempt
+status
+response_code
+response_body
+created_at
+updated_at
+```
+
+Status:
+
+```text
+PENDING
+SENDING
+SUCCESS
+FAILED
+```
+
+---
+
+# 21. Retry Strategy
+
+API failure harus memiliki retry.
+
+Contoh:
+
+```text
+Attempt 1
+    ↓
+5 sec
+    ↓
+Attempt 2
+    ↓
+15 sec
+    ↓
+Attempt 3
+    ↓
+45 sec
+    ↓
+FAILED
+```
+
+Retry menggunakan exponential backoff dan configurable maximum attempts.
+
+---
+
+# 22. Queue Architecture
+
+Production architecture:
+
+```text
+Scheduler
+    ↓
+Redis
+    ↓
+BullMQ
+    ↓
+Workers
+```
+
+Worker dapat dipisahkan:
+
+```text
+scraper.worker
+enrichment.worker
+delivery.worker
+```
+
+Contoh:
+
+```text
+Redis
+ │
+ ├── scrape queue
+ ├── enrichment queue
+ └── delivery queue
+```
+
+---
+
+# 23. Scheduler
+
+Schedule dapat berupa:
+
+```text
+Every 1 hour
+Every 6 hours
+Every 12 hours
+Every 24 hours
+Manual
+```
+
+Contoh:
+
+```text
+06:00 → JobStreet
+07:00 → Glints
+08:00 → Indeed
+09:00 → Career Websites
+```
+
+Schedule harus configurable per source.
+
+---
+
+# 24. Scrape Run
+
+Setiap scraping execution memiliki record:
+
+```text
+scrape_run_id
+source_id
+started_at
+finished_at
+pages_scraped
+jobs_found
+jobs_created
+jobs_updated
+jobs_rejected
+jobs_duplicate
+errors
+status
+```
+
+Contoh:
+
+```json
+{
+  "source": "jobstreet",
+  "pages_scraped": 50,
+  "jobs_found": 1240,
+  "jobs_created": 840,
+  "jobs_updated": 310,
+  "jobs_rejected": 90,
+  "jobs_duplicate": 0,
+  "errors": 3,
+  "status": "SUCCESS"
+}
+```
+
+---
+
+# 25. Error Handling
+
+Jenis error minimal:
+
+```text
+NETWORK_ERROR
+TIMEOUT
+PARSER_ERROR
+SOURCE_ERROR
+SOURCE_BLOCKED
+INVALID_DATA
+EMAIL_NOT_FOUND
+EMAIL_INVALID
+API_ERROR
+DATABASE_ERROR
+```
+
+Semua error harus memiliki:
+
+```text
+timestamp
+source
+job_id
+error_type
+message
+stack
+retry_count
+```
+
+---
+
+# 26. Logging
+
+Logging menggunakan structured logging.
+
+Contoh:
+
+```text
+2026-09-10T14:30:12+07:00
+source=jobstreet
+job_id=87456321
+action=extract
+status=success
+duration=1.42s
+```
+
+Recommended logger:
+
+```text
+Pino
+```
+
+---
+
+# 27. Dashboard
+
+Dashboard menggunakan:
+
+```text
+SvelteKit
+TypeScript
+```
+
+Dashboard berkomunikasi dengan JobForge API.
+
+## Main Navigation
+
+```text
+Dashboard
+Jobs
+Companies
+HR Contacts
+Sources
+Scraping Runs
+API Deliveries
+Errors
+Settings
+```
+
+---
+
+# 28. Dashboard Overview
+
+Dashboard menampilkan:
+
+```text
+Total Jobs
+Total Companies
+HR Emails Found
+Active Sources
+Successful Scrapes
+Failed Scrapes
+Jobs Sent
+Jobs Published
+```
+
+Contoh:
+
+```text
+┌─────────────────────────────────────────────────┐
+│ JOBFORGE                                        │
+│ Job Scraping & Aggregation Engine               │
+├──────────┬──────────┬──────────┬───────────────┤
+│ 12,482   │  8,921   │   8,420  │      96%      │
+│ Jobs     │ Companies│ HR Email │ Success Rate  │
+├──────────┴──────────┴──────────┴───────────────┤
+│ Scraping Activity                               │
+│                                                 │
+│ ████████████████████████████████                │
+│                                                 │
+├─────────────────────────────────────────────────┤
+│ Sources                                         │
+│                                                 │
+│ JobStreet    4,821 jobs     ● Healthy           │
+│ Glints       3,102 jobs     ● Healthy           │
+│ Indeed       2,884 jobs     ● Healthy           │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+# 29. Dashboard — Jobs
+
+Features:
+
+- Job listing.
+- Search.
+- Filter source.
+- Filter company.
+- Filter status.
+- Filter date.
+- View job detail.
+- View source.
+- View HR email.
+- View enrichment status.
+- View delivery status.
+
+Job detail:
+
+```text
+Company
+Logo
+Company Profile
+Job Title
+Description
+Salary
+Location
+HR Email
+Email Source
+Original Source
+Scraped At
+Status
+```
+
+---
+
+# 30. Dashboard — Companies
+
+Features:
+
+- Company listing.
+- Search company.
+- Company profile.
+- Logo.
+- Website.
+- Number of jobs.
+- HR contacts.
+- Last enrichment.
+- Last scraped job.
+
+Company detail:
+
+```text
+Company Profile
+Website
+Logo
+Industry
+HR Contacts
+Active Jobs
+Sources
+```
+
+---
+
+# 31. Dashboard — Sources
+
+Features:
+
+- Add source.
+- Edit source.
+- Enable/disable source.
+- Configure scraper.
+- Configure schedule.
+- Run manually.
+- View last run.
+- View success rate.
+
+Source table:
+
+```text
+Source
+Status
+Last Run
+Jobs Found
+Jobs Valid
+Jobs Rejected
+Success Rate
+Action
+```
+
+---
+
+# 32. Dashboard — Scraping Runs
+
+Features:
+
+- List scraping runs.
+- View run detail.
+- View duration.
+- Pages scraped.
+- Jobs found.
+- Jobs created.
+- Jobs updated.
+- Jobs rejected.
+- Error count.
+
+---
+
+# 33. Dashboard — API Deliveries
+
+Features:
+
+- Delivery status.
+- Success/failure.
+- HTTP response code.
+- Retry count.
+- Timestamp.
+- Request ID.
+- View error.
+
+Filters:
+
+```text
+SUCCESS
+FAILED
+PENDING
+SENDING
+```
+
+---
+
+# 34. Dashboard — Errors
+
+Centralized error monitoring:
+
+```text
+Source
+Error Type
+Job ID
+Message
+First Seen
+Last Seen
+Retry Count
+Status
+```
+
+---
+
+# 35. Project Structure
+
+Recommended monorepo:
+
+```text
+jobforge/
+│
+├── apps/
+│   ├── dashboard/
+│   │   ├── src/
+│   │   │   ├── routes/
+│   │   │   ├── lib/
+│   │   │   │   ├── api/
+│   │   │   │   ├── components/
+│   │   │   │   ├── stores/
+│   │   │   │   └── types/
+│   │   │   └── app.d.ts
+│   │   └── package.json
+│   │
+│   └── api/
+│       ├── src/
+│       └── package.json
+│
+├── services/
+│   ├── scraper/
+│   ├── enrichment/
+│   └── worker/
+│
+├── packages/
+│   ├── types/
+│   ├── schemas/
+│   └── utils/
+│
+├── prisma/
+│
+├── docker/
+│
+├── docker-compose.yml
+├── package.json
+└── README.md
+```
+
+---
+
+# 36. Service Responsibilities
+
+## API
+
+```text
+Authentication
+Source Management
+Job Management
+Company Management
+Scrape Run Management
+Delivery Management
+Dashboard API
+```
+
+## Scraper
+
+```text
+Fetch source
+Extract HTML/data
+Parse data
+Map data
+Return normalized job
+```
+
+## Enrichment
+
+```text
+Company enrichment
+Website discovery
+Career/contact discovery
+HR email discovery
+Email validation
+```
+
+## Worker
+
+```text
+Queue processing
+Scraping jobs
+Enrichment jobs
+Delivery jobs
+Retry
+```
+
+## Dashboard
+
+```text
+Admin UI
+Monitoring
+Configuration
+Analytics
+```
+
+---
+
+# 37. Security Requirements
+
+## API Authentication
+
+Gunakan API key atau token authentication untuk komunikasi dengan Job Portal.
+
+Secret harus disimpan di environment:
+
+```text
+JOB_PORTAL_API_URL
+JOB_PORTAL_API_KEY
+DATABASE_URL
+REDIS_URL
+```
+
+Tidak boleh hardcode secret di source code.
+
+## Dashboard Authentication
+
+Dashboard admin harus memiliki authentication dan authorization.
+
+Minimum role:
+
+```text
+ADMIN
+OPERATOR
+VIEWER
+```
+
+---
+
+# 38. Responsible Scraping
+
+JobForge hanya mengambil data yang dapat diakses secara publik atau memang diizinkan untuk diakses.
+
+Sistem wajib:
+
+- Menghormati Terms of Service yang berlaku.
+- Menghormati robots/access policies yang relevan.
+- Menggunakan rate limiting.
+- Menggunakan concurrency yang wajar.
+- Tidak melakukan CAPTCHA bypass.
+- Tidak melakukan unauthorized login.
+- Tidak melakukan bypass access control.
+- Tidak mengambil private data.
+- Tidak menebak email pribadi recruiter.
+- Menyimpan provenance/source URL.
+- Mendukung mekanisme penghapusan atau penonaktifan data bila diperlukan.
+
+---
+
+# 39. Observability
+
+Production system harus memiliki:
+
+```text
+Structured Logs
+Metrics
+Error Tracking
+Scrape Statistics
+API Delivery Statistics
+Worker Health
+```
+
+Metrics minimum:
+
+```text
+scrape_total
+scrape_success_total
+scrape_failed_total
+jobs_scraped_total
+jobs_valid_total
+jobs_rejected_total
+jobs_duplicate_total
+hr_email_found_total
+api_delivery_success_total
+api_delivery_failed_total
+```
+
+---
+
+# 40. Performance Requirements
+
+MVP target:
+
+- Worker dapat menjalankan beberapa scraping task secara concurrent.
+- Scraping tidak boleh memblok seluruh service.
+- API delivery menggunakan bulk request.
+- Database menggunakan index untuk field pencarian utama.
+- Queue memungkinkan horizontal scaling.
+- Browser instances dibatasi berdasarkan resource server.
+
+Performance target harus divalidasi melalui load testing sebelum production scale ditentukan.
+
+---
+
+# 41. Reliability
+
+JobForge harus mampu:
+
+- Recover setelah worker restart.
+- Retry failed queue jobs.
+- Tidak kehilangan job ketika proses worker mati.
+- Menyimpan scraping run.
+- Menyimpan delivery status.
+- Mencegah duplicate delivery.
+- Melanjutkan job yang belum selesai setelah restart.
+
+---
+
+# 42. MVP Scope
+
+## Phase 1 — Foundation
+
+```text
+[ ] Bun
+[ ] TypeScript
+[ ] PostgreSQL
+[ ] Prisma
+[ ] SvelteKit
+[ ] Basic API
+[ ] Basic Dashboard
+```
+
+## Phase 2 — Scraper
+
+```text
+[ ] Scraper interface
+[ ] First source adapter
+[ ] Playwright
+[ ] Cheerio
+[ ] Job extraction
+[ ] Company extraction
+[ ] Logo URL
+[ ] Source tracking
+```
+
+## Phase 3 — Data Processing
+
+```text
+[ ] Normalizer
+[ ] Company deduplication
+[ ] Job deduplication
+[ ] Validation
+[ ] HR email discovery
+[ ] Email validation
+```
+
+## Phase 4 — Integration
+
+```text
+[ ] Job Portal API
+[ ] Bulk import
+[ ] API delivery tracking
+[ ] Retry
+```
+
+## Phase 5 — Production Worker
+
+```text
+[ ] Redis
+[ ] BullMQ
+[ ] Scraper Worker
+[ ] Enrichment Worker
+[ ] Delivery Worker
+[ ] Scheduler
+```
+
+## Phase 6 — Monitoring
+
+```text
+[ ] Scrape Run dashboard
+[ ] Error dashboard
+[ ] API Delivery dashboard
+[ ] Source monitoring
+[ ] Metrics
+```
+
+---
+
+# 43. Future Development
+
+Setelah MVP stabil, fitur berikut dapat ditambahkan:
+
+- AI job classification.
+- AI skill extraction.
+- AI job summarization.
+- Job quality scoring.
+- Company quality scoring.
+- Salary normalization.
+- Location normalization.
+- Skill taxonomy.
+- Job recommendation.
+- Expired job detection.
+- Automatic job refresh.
+- Advanced company intelligence.
+- Multi-language job processing.
+- Search indexing.
+- OpenSearch/Elasticsearch integration.
+- Multi-tenant architecture.
+
+---
+
+# 44. Acceptance Criteria
+
+## Scraping
+
+- [ ] Minimal satu source berhasil di-scrape.
+- [ ] Job title berhasil diambil.
+- [ ] Job description berhasil diambil.
+- [ ] Company name berhasil diambil.
+- [ ] Company profile berhasil diambil.
+- [ ] Logo URL berhasil diambil.
+- [ ] Source URL tersimpan.
+- [ ] Salary tersimpan jika tersedia.
+
+## HR Email
+
+- [ ] HR/recruitment email dapat ditemukan dari sumber publik yang tersedia.
+- [ ] Email source URL disimpan.
+- [ ] Email validation tersedia.
+- [ ] Job tanpa HR email tidak dapat berstatus `READY`.
+
+## Data Quality
+
+- [ ] Canonical schema tervalidasi.
+- [ ] Duplicate job terdeteksi.
+- [ ] Duplicate company terdeteksi.
+- [ ] Mandatory fields tervalidasi.
+- [ ] Salary yang tidak tersedia bernilai `null`.
+
+## API
+
+- [ ] Job valid dapat dikirim ke Job Portal.
+- [ ] Bulk import tersedia.
+- [ ] Delivery status tersimpan.
+- [ ] API failure dapat di-retry.
+- [ ] Duplicate delivery dapat dicegah.
+
+## Dashboard
+
+- [ ] Source dapat dikelola.
+- [ ] Scrape run dapat dimonitor.
+- [ ] Job dapat dicari dan difilter.
+- [ ] Company dapat dilihat.
+- [ ] HR contact dapat dilihat.
+- [ ] API delivery dapat dimonitor.
+- [ ] Error dapat dilihat.
+
+---
+
+# 45. Final Product Architecture
+
+```text
+┌───────────────────────────────────────────────────────────┐
+│                         JOBFORGE                           │
+│             Job Scraping & Aggregation Engine             │
+├───────────────────────────────────────────────────────────┤
+│                                                           │
+│  SvelteKit Dashboard                                      │
+│           │                                               │
+│           ▼                                               │
+│     Bun + TypeScript API                                  │
+│           │                                               │
+│     ┌─────┼─────────────────────┐                         │
+│     ▼     ▼                     ▼                         │
+│  Sources  Jobs              Companies                     │
+│           │                     │                         │
+│           └──────────┬──────────┘                         │
+│                      ▼                                    │
+│              Redis + BullMQ                               │
+│                      │                                    │
+│        ┌─────────────┼─────────────┐                      │
+│        ▼             ▼             ▼                      │
+│    Scraper       Enrichment     Delivery                  │
+│    Worker         Worker          Worker                  │
+│        │             │             │                      │
+│        └─────────────┼─────────────┘                      │
+│                      ▼                                    │
+│                  PostgreSQL                               │
+│                      │                                    │
+│                      ▼                                    │
+│                Job Portal API                             │
+│                      │                                    │
+│                      ▼                                    │
+│                  JOB PORTAL                               │
+│                      │                                    │
+│                      ▼                                    │
+│                     USER                                  │
+│                      │                                    │
+│                      ▼                                    │
+│                    APPLY                                  │
+│                                                           │
+└───────────────────────────────────────────────────────────┘
+```
+
+---
+
+# 46. Product Principle
+
+JobForge dibangun dengan prinsip:
+
+> **Collect → Enrich → Validate → Deduplicate → Deliver**
+
+Tujuan akhirnya bukan sekadar mengumpulkan sebanyak mungkin lowongan, tetapi menghasilkan **job data yang bersih, terstruktur, dapat ditelusuri sumbernya, memiliki kontak recruitment yang valid jika tersedia, dan siap dikonsumsi oleh Job Portal.**
+
+---
+
+# 47. Final Decision
+
+**Product Name:** JobForge
+
+**Stack:**
+
+```text
+Frontend  : SvelteKit + TypeScript
+Backend   : Bun + TypeScript
+Scraper   : Playwright + Cheerio
+Validation: Zod
+ORM       : Prisma
+Database  : PostgreSQL
+Queue     : Redis + BullMQ
+Runtime   : Bun
+Deploy    : Docker
+Proxy     : Nginx
+```
+
+**Primary Output:**
+
+```text
+Canonical Job JSON
+        ↓
+Job Portal REST API
+```
+
+**Primary Required Data:**
+
+```text
+Company Logo URL
+Company Name
+Company Profile
+Job Position
+Job Description / Responsibilities
+HR / Recruitment Email
+Source Platform
+Source URL
+```
+
+**Optional Data:**
+
+```text
+Salary
+Location
+Employment Type
+Workplace Type
+Requirements
+Skills
+Published Date
+Expired Date
+Company Website
+Industry
+```
+
+---
+
+## End of PRD
+
+**JobForge — Collect. Enrich. Deliver.**

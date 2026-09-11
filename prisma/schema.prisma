@@ -1,0 +1,202 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// JOBFORCE — Job Scraping & Aggregation Engine
+// Data model per PRD §18
+// ─────────────────────────────────────────────────────────────
+
+// §8 Source Management
+model Source {
+  id          String      @id @default(cuid())
+  slug        String      @unique // source_id: jobstreet, glints, indeed, ...
+  name        String
+  baseUrl     String
+  type        String      @default("JOB_PORTAL") // JOB_PORTAL | CAREER_SITE | PUBLIC_SOURCE
+  status      String      @default("ACTIVE") // ACTIVE | INACTIVE | ERROR
+  scraperType String      @default("STATIC") // STATIC | DYNAMIC | API
+  schedule    String      @default("every_6_hours") // hourly | every_6_hours | every_12_hours | daily | manual
+  lastRunAt   DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  jobLinks JobSource[]
+  runs     ScrapeRun[]
+  errors   ScrapeError[]
+
+  @@index([status])
+}
+
+// §11 Company (deduplicated: website/domain > normalized name)
+model Company {
+  id             String   @id @default(cuid())
+  name           String
+  normalizedName String   @unique
+  logoUrl        String
+  website        String?
+  profile        String
+  industry       String?
+  enrichedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  jobs Job[]
+
+  @@index([normalizedName])
+}
+
+// §16 Job Lifecycle: SCRAPED → PROCESSING → ENRICHING → VALIDATING → READY → SENT → PUBLISHED
+// Failure: FAILED | REJECTED | NEEDS_ENRICHMENT
+model Job {
+  id              String    @id @default(cuid())
+  fingerprint     String    @unique // §15 SHA256(normalized_company + normalized_title + normalized_location)
+  title           String
+  normalizedTitle String
+  description     String
+  salaryMin       Int?
+  salaryMax       Int?
+  currency        String?
+  location        String?
+  employmentType  String? // FULL_TIME | PART_TIME | CONTRACT | INTERNSHIP
+  workplaceType   String? // ONSITE | REMOTE | HYBRID
+  requirements    String? // JSON string[]
+  skills          String? // JSON string[]
+  status          String    @default("SCRAPED")
+  statusReason    String? // why NEEDS_ENRICHMENT / REJECTED
+  scrapedAt       DateTime  @default(now())
+  publishedAt     DateTime?
+  companyId       String?
+  company         Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  jobLinks   JobSource[]
+  contact    JobContact?
+  deliveries ApiDelivery[]
+
+  @@index([status])
+  @@index([scrapedAt])
+  @@index([companyId])
+}
+
+// §15.2 Source Identity — one job may appear on multiple platforms
+model JobSource {
+  id          String @id @default(cuid())
+  jobId       String
+  sourceId    String
+  sourceJobId String
+  sourceUrl   String
+  firstSeenAt DateTime @default(now())
+
+  job    Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  source Source @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, sourceJobId])
+  @@index([jobId])
+}
+
+// §12 HR Email Discovery — mandatory for READY/SENT
+model JobContact {
+  id             String   @id @default(cuid())
+  jobId          String   @unique
+  hrEmail        String
+  emailSourceUrl String?
+  emailVerified  Boolean  @default(false)
+  emailStatus    String   @default("UNKNOWN") // VALID | INVALID | UNKNOWN
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([emailStatus])
+}
+
+// §24 Scrape Run
+model ScrapeRun {
+  id            String    @id @default(cuid())
+  sourceId      String
+  startedAt     DateTime  @default(now())
+  finishedAt    DateTime?
+  pagesScraped  Int       @default(0)
+  jobsFound     Int       @default(0)
+  jobsCreated   Int       @default(0)
+  jobsUpdated   Int       @default(0)
+  jobsRejected  Int       @default(0)
+  jobsDuplicate Int       @default(0)
+  errorCount    Int       @default(0)
+  status        String    @default("RUNNING") // RUNNING | SUCCESS | FAILED
+
+  source Source @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([sourceId])
+  @@index([status])
+  @@index([startedAt])
+}
+
+// §25 Error Handling — centralized error monitoring
+model ScrapeError {
+  id         String   @id @default(cuid())
+  sourceId   String?
+  jobId      String?
+  errorType  String // NETWORK_ERROR | TIMEOUT | PARSER_ERROR | SOURCE_ERROR | SOURCE_BLOCKED | INVALID_DATA | EMAIL_NOT_FOUND | EMAIL_INVALID | API_ERROR | DATABASE_ERROR
+  message    String
+  stack      String?
+  retryCount Int      @default(0)
+  status     String   @default("OPEN") // OPEN | RESOLVED
+  firstSeen  DateTime @default(now())
+  lastSeen   DateTime @default(now())
+
+  source Source? @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+
+  @@index([errorType])
+  @@index([status])
+  @@index([lastSeen])
+}
+
+// §20 API Delivery tracking
+model ApiDelivery {
+  id           String    @id @default(cuid())
+  jobId        String
+  endpoint     String
+  requestId    String
+  attempt      Int       @default(1)
+  maxAttempts  Int       @default(3)
+  status       String    @default("PENDING") // PENDING | SENDING | SUCCESS | FAILED
+  responseCode Int?
+  responseBody String?
+  nextRetryAt  DateTime?
+  deliveredAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([jobId])
+  @@index([createdAt])
+}
+
+// §23 Scheduler + §37 Settings (env-driven in production)
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// §26 Structured Logging
+model ActivityLog {
+  id         String   @id @default(cuid())
+  ts         DateTime @default(now())
+  source     String?
+  jobId      String?
+  action     String // scrape | parse | normalize | enrich | validate | dedup | deliver | import | error
+  status     String // success | failed | info | warning
+  message    String
+  durationMs Int?
+
+  @@index([ts])
+}
