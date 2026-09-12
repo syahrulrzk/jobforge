@@ -337,3 +337,19 @@ Stage Summary:
 - DB akhir: 5 source Indonesia saja (JobStreet ACTIVE + 4 INACTIVE), 0 job (hasil test dibersihkan)
 - tsc clean utk file berubah; homepage 200
 - Catatan: scheduler tick bisa menandai JobStreet ERROR lagi bila masih diblokir — perilaku jujur engine; live search dengan pilihan manual tetap override status
+---
+Task ID: 17
+Agent: Super Z (main)
+Task: Dokumentasi implementasi production JobForge (request user "buat doucmnetasi implementasi production")
+
+Work Log:
+- AskUserQuestion: user pilih Markdown, audiens dev & self, scope full system, lengkap 20+ hal, wajib diagram arsitektur, bahasa Indonesia, detail level path+fungsi
+- Eksplorasi codebase utk akurasi: 19 API routes, 14 lib modul, 14 komponen UI, 30 scripts, package.json (Next 16/React 19/Prisma 6/Playwright/bun standalone), SETTING_KEYS, ENGINES registry, deliverReadyJobs, REAL_BOARDS, tick scheduler
+- Tulis download/JobForge-Dokumentasi-Implementasi-Production.md — 19 bab + TOC + 3 diagram Mermaid (arsitektur flowchart, lifecycle stateDiagram, live search sequenceDiagram)
+- Verifikasi: grep export method semua route.ts → koreksi 5 klaim API yang meleset (jobs/[id] PATCH tanpa DELETE; sources/[id] PATCH+DELETE bukan GET/PUT; POST /api/deliveries {id} untuk retry, bukan /[id]/retry; PATCH /api/errors {id} resolve)
+- Validasi render 3 blok Mermaid via mmdc (scripts/check-doc-mermaid.py) — semua OK
+
+Stage Summary:
+- Deliverable: /home/z/my-project/download/JobForge-Dokumentasi-Implementasi-Production.md (657 baris, ±46 KB, 19 bab)
+- Semua path file & fungsi yang disebut terverifikasi ada di codebase (log:engine.ts:69, discoverMailto:746, startEngine:909, validateJob:pipeline.ts:138, jobFingerprint:77, dst.)
+- Isi penting: aturan 1-instance per DB (scheduler in-process), flag hardening production (engine.ts:797 simulated 7% delivery failure harus dimatikan, DATA_MODE=real, auth dashboard belum ada), runbook 9 kasus termasuk JobStreet 403 → proxy residensial
