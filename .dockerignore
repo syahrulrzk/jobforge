@@ -1,0 +1,27 @@
+# Build context Docker — jangan bawa artefak lokal ke image build CI
+node_modules
+.next
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+dev.log
+server.log
+
+# Data & artefak lokal
+db
+prisma/dev.db
+*.db
+upload
+download
+tool-results
+.freebuff
+.zscripts
+mini-services
+examples
+tests
+
+# Dokumentasi kerja (tidak dibutuhkan build)
+worklog.md
