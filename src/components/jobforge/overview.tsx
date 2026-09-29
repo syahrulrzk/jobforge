@@ -5,13 +5,13 @@ import {
   AreaChart,
   Bar,
   BarChart,
-  CartesianGrid,
+  Cell,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
-import { Activity, AlertTriangle, ArrowRight, Building2, CheckCircle2, FileText, Mail, Rocket, Send, XCircle } from "lucide-react";
+import { AlertTriangle, ArrowRight, Building2, CheckCircle2, FileText, Mail, Rocket, Send, XCircle } from "lucide-react";
 import { StatCard, StatusBadge, LogActionColor, timeAgo, EmptyState, CompanyAvatar } from "./ui-bits";
 import { useApi } from "@/hooks/use-api";
 import { useJobForgeStore } from "@/store/jobforge";
@@ -36,7 +36,6 @@ interface DashboardData {
     failedDeliveries: number;
     openErrors: number;
   };
-  inFlight: { scraped: number; processing: number; enriching: number; validating: number; ready: number };
   activity: { date: string; created: number; published: number }[];
   statusDist: { status: string; count: number }[];
   sourceHealth: {
@@ -53,13 +52,50 @@ interface DashboardData {
   recentActivity: { id: string; ts: string; source: string | null; action: string; status: string; message: string; durationMs: number | null }[];
 }
 
-const PIPELINE_STEPS = [
-  { key: "scraped", label: "Scraped" },
-  { key: "processing", label: "Processing" },
-  { key: "enriching", label: "Enriching" },
-  { key: "validating", label: "Validating" },
-  { key: "ready", label: "Ready" },
-] as const;
+
+const Y_AXIS_W = 88;
+
+// warna bar per-status — ngikutin palet STATUS_STYLES di ui-bits biar konsisten sama badge
+const STATUS_BAR_COLORS: Record<string, string> = {
+  SCRAPED: "#a1a1aa",
+  PROCESSING: "#f59e0b",
+  ENRICHING: "#e879f9",
+  VALIDATING: "#a78bfa",
+  READY: "#34d399",
+  SENT: "#2dd4bf",
+  PUBLISHED: "#10b981",
+  NEEDS_ENRICHMENT: "#eab308",
+  FAILED: "#fb7185",
+  REJECTED: "#fb7185",
+};
+
+// label status rata KIRI biar sejajar sama judul kartu —
+// default recharts right-align nempel ke bar, jadi keliatan "ke tengah"
+function StatusYTick({ x = 0, y = 0, payload }: { x?: number; y?: number; payload?: { value: string } }) {
+  return (
+    <text x={x - Y_AXIS_W + 8} y={y} fill="#a1a1aa" fontSize={9.5} textAnchor="start" dominantBaseline="middle">
+      {payload?.value}
+    </text>
+  );
+}
+
+// tooltip ngikutin tema (dulu hardcoded gelap #18181b — item di mode light)
+function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: { name?: string; value?: number; color?: string; fill?: string; payload?: { label?: string; status?: string } }[]; label?: string }) {
+  if (!active || !payload?.length) return null;
+  const p0 = payload[0];
+  const title = p0?.payload?.label ?? p0?.payload?.status ?? label;
+  return (
+    <div className="rounded-lg border border-border bg-popover px-3 py-2 text-xs shadow-md">
+      <p className="mb-1 font-medium text-popover-foreground">{title}</p>
+      {payload.map((p, i) => (
+        <p key={i} className="flex items-center gap-2 text-popover-foreground/90">
+          <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: p.color ?? p.fill }} />
+          {p.name}: <span className="font-semibold tabular-nums">{p.value?.toLocaleString("id-ID")}</span>
+        </p>
+      ))}
+    </div>
+  );
+}
 
 export function OverviewView({ live }: { live: boolean }) {
   const { data } = useApi<DashboardData>("/api/dashboard", { intervalMs: live ? 4000 : null });
@@ -67,7 +103,7 @@ export function OverviewView({ live }: { live: boolean }) {
 
   if (!data) return <OverviewSkeleton />;
 
-  const { stats, inFlight, activity, sourceHealth, topCompanies, recentActivity, statusDist } = data;
+  const { stats, activity, sourceHealth, topCompanies, recentActivity, statusDist } = data;
   const chartData = activity.map((a) => ({
     ...a,
     label: new Date(a.date + "T00:00:00").toLocaleDateString("id-ID", { day: "numeric", month: "short" }),
@@ -75,48 +111,24 @@ export function OverviewView({ live }: { live: boolean }) {
 
   return (
     <div className="space-y-5">
-      {/* Stat cards — PRD §28 */}
+      {/* Stat cards — PRD §28 (primary + delivery KPI) */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <StatCard label="Total Jobs" value={stats.totalJobs.toLocaleString("id-ID")} sub={`${stats.jobsPublished.toLocaleString("id-ID")} published`} icon={<FileText className="h-4 w-4" />} accent="amber" />
         <StatCard label="Companies" value={stats.totalCompanies.toLocaleString("id-ID")} sub="deduplicated profiles" icon={<Building2 className="h-4 w-4" />} accent="teal" />
         <StatCard label="HR Emails" value={stats.hrEmailsFound.toLocaleString("id-ID")} sub={`${stats.validEmails.toLocaleString("id-ID")} verified valid`} icon={<Mail className="h-4 w-4" />} accent="emerald" />
         <StatCard label="Success Rate" value={`${stats.successRate}%`} sub={`${stats.successfulScrapes} OK / ${stats.failedScrapes} failed`} icon={<CheckCircle2 className="h-4 w-4" />} accent={stats.successRate >= 90 ? "emerald" : stats.successRate >= 70 ? "amber" : "rose"} />
-      </div>
-
-      {/* Live pipeline strip */}
-      <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
-        <div className="mb-3 flex items-center gap-2">
-          <Activity className="h-4 w-4 text-amber-400" />
-          <h3 className="text-sm font-semibold text-zinc-200">Live Pipeline</h3>
-          <span className="ml-auto text-[11px] text-zinc-500">job dalam proses per stage</span>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {PIPELINE_STEPS.map((step, i) => (
-            <div key={step.key} className="flex items-center gap-2">
-              <div className="rounded-lg border border-zinc-700/70 bg-zinc-800/60 px-3 py-2 text-center min-w-[92px]">
-                <p className="text-lg font-bold tabular-nums text-zinc-100">{inFlight[step.key]}</p>
-                <p className="text-[10px] font-medium tracking-wide text-zinc-500 uppercase">{step.label}</p>
-              </div>
-              {i < PIPELINE_STEPS.length - 1 && <span className="text-zinc-600">→</span>}
-            </div>
-          ))}
-          <span className="text-zinc-600">→</span>
-          <div className="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
-            <Rocket className="h-3.5 w-3.5 text-emerald-400" />
-            <div className="text-center">
-              <p className="text-lg font-bold tabular-nums text-emerald-300">{stats.jobsSent}</p>
-              <p className="text-[10px] font-medium tracking-wide text-emerald-500/80 uppercase">Sent</p>
-            </div>
-          </div>
-        </div>
+        <StatCard label="Jobs Sent" value={stats.jobsSent.toLocaleString("id-ID")} sub={`${stats.pendingDeliveries} delivery in flight`} icon={<Send className="h-4 w-4" />} accent="teal" />
+        <StatCard label="Published" value={stats.jobsPublished.toLocaleString("id-ID")} sub="live di Job Portal" icon={<Rocket className="h-4 w-4" />} accent="emerald" />
+        <StatCard label="Needs Enrichment" value={stats.needsEnrichment.toLocaleString("id-ID")} sub={`${stats.rejected} rejected`} icon={<AlertTriangle className="h-4 w-4" />} accent="amber" />
+        <StatCard label="Open Issues" value={stats.openErrors.toLocaleString("id-ID")} sub={`${stats.failedDeliveries} failed deliveries`} icon={<XCircle className="h-4 w-4" />} accent="rose" />
       </div>
 
       {/* Charts row */}
       <div className="grid gap-4 lg:grid-cols-5">
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 lg:col-span-3">
+        <div className="rounded-xl border border-border bg-card/60 p-4 lg:col-span-3">
           <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-zinc-200">Scraping Activity</h3>
-            <div className="flex items-center gap-4 text-[11px] text-zinc-500">
+            <h3 className="text-sm font-semibold text-foreground">Scraping Activity</h3>
+            <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
               <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber-400" /> Jobs scraped</span>
               <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-400" /> Published</span>
             </div>
@@ -134,14 +146,9 @@ export function OverviewView({ live }: { live: boolean }) {
                     <stop offset="100%" stopColor="#34d399" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid stroke="#27272a" strokeDasharray="3 3" vertical={false} />
                 <XAxis dataKey="label" tick={{ fill: "#71717a", fontSize: 10 }} tickLine={false} axisLine={{ stroke: "#3f3f46" }} interval="preserveStartEnd" />
                 <YAxis tick={{ fill: "#71717a", fontSize: 10 }} tickLine={false} axisLine={false} allowDecimals={false} />
-                <Tooltip
-                  contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", borderRadius: 8, fontSize: 12 }}
-                  labelStyle={{ color: "#a1a1aa" }}
-                  cursor={{ stroke: "#52525b" }}
-                />
+                <Tooltip content={<ChartTooltip />} cursor={{ stroke: "var(--border)" }} />
                 <Area type="monotone" dataKey="created" stroke="#f59e0b" strokeWidth={2} fill="url(#gCreated)" name="Scraped" />
                 <Area type="monotone" dataKey="published" stroke="#34d399" strokeWidth={2} fill="url(#gPublished)" name="Published" />
               </AreaChart>
@@ -149,21 +156,21 @@ export function OverviewView({ live }: { live: boolean }) {
           </div>
         </div>
 
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 lg:col-span-2">
+        <div className="rounded-xl border border-border bg-card/60 p-4 lg:col-span-2">
           <div className="mb-4 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-zinc-200">Status Distribution</h3>
+            <h3 className="text-sm font-semibold text-foreground">Status Distribution</h3>
           </div>
           <div className="h-56">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={statusDist} layout="vertical" margin={{ top: 0, right: 12, left: 30, bottom: 0 }}>
-                <CartesianGrid stroke="#27272a" strokeDasharray="3 3" horizontal={false} />
+              <BarChart data={statusDist} layout="vertical" margin={{ top: 0, right: 12, left: 0, bottom: 0 }}>
                 <XAxis type="number" tick={{ fill: "#71717a", fontSize: 10 }} tickLine={false} axisLine={false} allowDecimals={false} />
-                <YAxis type="category" dataKey="status" width={110} tick={{ fill: "#a1a1aa", fontSize: 9.5 }} tickLine={false} axisLine={false} />
-                <Tooltip
-                  contentStyle={{ background: "#18181b", border: "1px solid #3f3f46", borderRadius: 8, fontSize: 12 }}
-                  cursor={{ fill: "#27272a" }}
-                />
-                <Bar dataKey="count" name="Jobs" fill="#f59e0b" radius={[0, 4, 4, 0]} barSize={12} />
+                <YAxis type="category" dataKey="status" width={Y_AXIS_W} tick={<StatusYTick />} tickLine={false} axisLine={false} />
+                <Tooltip content={<ChartTooltip />} cursor={{ fill: "var(--accent)" }} />
+                <Bar dataKey="count" name="Jobs" radius={[0, 4, 4, 0]} barSize={12}>
+                  {statusDist.map((entry) => (
+                    <Cell key={entry.status} fill={STATUS_BAR_COLORS[entry.status] ?? "#a1a1aa"} />
+                  ))}
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -171,12 +178,12 @@ export function OverviewView({ live }: { live: boolean }) {
       </div>
 
       {/* Top companies leaderboard — logos (§11, §28) */}
-      <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+      <div className="rounded-xl border border-border bg-card/60 p-4">
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold text-zinc-200">Top Companies</h3>
+          <h3 className="text-sm font-semibold text-foreground">Top Companies</h3>
           <button
             onClick={() => setView("companies")}
-            className="flex items-center gap-1 text-[11px] font-medium text-amber-400 transition-colors hover:text-amber-300"
+            className="flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400 transition-colors hover:text-amber-700 dark:text-amber-300"
             title="Buka halaman Companies"
           >
             {stats.totalCompanies.toLocaleString("id-ID")} perusahaan
@@ -189,19 +196,19 @@ export function OverviewView({ live }: { live: boolean }) {
             return (
               <div
                 key={c.id}
-                onClick={() => setView("companies")}
-                className="cursor-pointer rounded-lg border border-transparent p-2 transition-colors hover:border-zinc-700/70 hover:bg-zinc-800/40"
+                onClick={() => setView("companies", { focusCompany: c.id })}
+                className="cursor-pointer rounded-lg border border-transparent p-2 transition-colors hover:border-border/60 hover:bg-accent"
               >
                 <div className="flex items-center gap-2.5">
-                  <span className="w-4 shrink-0 text-center font-mono text-[10px] text-zinc-600">{i + 1}</span>
+                  <span className="w-4 shrink-0 text-center font-mono text-[10px] text-muted-foreground/80">{i + 1}</span>
                   <CompanyAvatar name={c.name} logoUrl={c.logoUrl} website={c.website} size={36} />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-[13px] font-medium text-zinc-200">{c.name}</p>
-                    <p className="truncate text-[11px] text-zinc-500">{c.industry ?? "Industri belum diketahui"}</p>
+                    <p className="truncate text-[13px] font-medium text-foreground">{c.name}</p>
+                    <p className="truncate text-[11px] text-muted-foreground">{c.industry ?? "Industri belum diketahui"}</p>
                   </div>
-                  <span className="shrink-0 text-sm font-bold tabular-nums text-zinc-300">{c.jobCount}</span>
+                  <span className="shrink-0 text-sm font-bold tabular-nums text-foreground/90">{c.jobCount}</span>
                 </div>
-                <div className="mt-2 h-1 overflow-hidden rounded-full bg-zinc-800">
+                <div className="mt-2 h-1 overflow-hidden rounded-full bg-accent">
                   <div
                     className="h-full rounded-full bg-gradient-to-r from-amber-500 to-amber-400 transition-all"
                     style={{ width: `${Math.max(6, Math.round((c.jobCount / max) * 100))}%` }}
@@ -215,33 +222,33 @@ export function OverviewView({ live }: { live: boolean }) {
 
       {/* Sources health + activity console */}
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+        <div className="rounded-xl border border-border bg-card/60 p-4">
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-zinc-200">Sources Health</h3>
-            <span className="text-[11px] text-zinc-500">{stats.activeSources}/{stats.totalSources} active</span>
+            <h3 className="text-sm font-semibold text-foreground">Sources Health</h3>
+            <span className="text-[11px] text-muted-foreground">{stats.activeSources}/{stats.totalSources} active</span>
           </div>
           <div className="space-y-1">
             {sourceHealth.map((s) => (
-              <div key={s.id} className="flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-zinc-800/40">
+              <div key={s.id} className="flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-accent">
                 <span className={cn("h-2 w-2 shrink-0 rounded-full", s.status === "ACTIVE" ? "bg-emerald-400" : s.status === "ERROR" ? "bg-rose-400" : "bg-zinc-600")} />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-zinc-200">{s.name}</p>
-                  <p className="text-[11px] text-zinc-500">{s.scraperType.split(",").map((x) => x.trim().toLowerCase()).join(" · ")} · last run {timeAgo(s.lastRunAt)}</p>
+                  <p className="truncate text-sm font-medium text-foreground">{s.name}</p>
+                  <p className="text-[11px] text-muted-foreground">{s.scraperType.split(",").map((x) => x.trim().toLowerCase()).join(" · ")} · last run {timeAgo(s.lastRunAt)}</p>
                 </div>
-                <span className="text-sm font-semibold tabular-nums text-zinc-300">{s.jobCount.toLocaleString("id-ID")}</span>
-                <span className="w-10 text-right text-[11px] tabular-nums text-zinc-500">{s.successRate === null ? "—" : `${s.successRate}%`}</span>
+                <span className="text-sm font-semibold tabular-nums text-foreground/90">{s.jobCount.toLocaleString("id-ID")}</span>
+                <span className="w-10 text-right text-[11px] tabular-nums text-muted-foreground">{s.successRate === null ? "—" : `${s.successRate}%`}</span>
                 <StatusBadge status={s.status} />
               </div>
             ))}
           </div>
         </div>
 
-        <div className="relative rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+        <div className="relative rounded-xl border border-border bg-card/60 p-4">
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-zinc-200">Activity Console</h3>
+            <h3 className="text-sm font-semibold text-foreground">Activity Console</h3>
             <button
               onClick={() => setView("activity")}
-              className="flex items-center gap-1 text-[11px] font-medium text-amber-400 transition-colors hover:text-amber-300"
+              className="flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400 transition-colors hover:text-amber-700 dark:text-amber-300"
               title="Buka full log di Activity Console"
             >
               {live && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />}
@@ -254,27 +261,19 @@ export function OverviewView({ live }: { live: boolean }) {
           ) : (
             <div className="absolute inset-x-4 bottom-4 top-12 space-y-0.5 overflow-y-auto font-mono text-[11px] leading-relaxed [scrollbar-width:thin]" onClick={() => setView("activity")}>
               {recentActivity.map((log) => (
-                <div key={log.id} className="flex gap-2 rounded px-1.5 py-1 hover:bg-zinc-800/40">
-                  <span className="shrink-0 text-zinc-600">{new Date(log.ts).toLocaleTimeString("id-ID", { hour12: false })}</span>
+                <div key={log.id} className="flex gap-2 rounded px-1.5 py-1 hover:bg-accent">
+                  <span className="shrink-0 text-muted-foreground/80">{new Date(log.ts).toLocaleTimeString("id-ID", { hour12: false })}</span>
                   <span className="w-16 shrink-0"><LogActionColor action={log.action} /></span>
-                  {log.source && <span className="shrink-0 text-zinc-500">[{log.source}]</span>}
-                  <span className={cn("min-w-0 flex-1", log.status === "failed" ? "text-rose-300" : log.status === "warning" ? "text-yellow-300" : log.status === "info" ? "text-zinc-400" : "text-zinc-300")}>
+                  {log.source && <span className="shrink-0 text-muted-foreground">[{log.source}]</span>}
+                  <span className={cn("min-w-0 flex-1", log.status === "failed" ? "text-rose-700 dark:text-rose-300" : log.status === "warning" ? "text-yellow-700 dark:text-yellow-300" : log.status === "info" ? "text-muted-foreground" : "text-foreground/90")}>
                     {log.message}
-                    {log.durationMs !== null && <span className="ml-1 text-zinc-600">({(log.durationMs / 1000).toFixed(2)}s)</span>}
+                    {log.durationMs !== null && <span className="ml-1 text-muted-foreground/80">({(log.durationMs / 1000).toFixed(2)}s)</span>}
                   </span>
                 </div>
               ))}
             </div>
           )}
         </div>
-      </div>
-
-      {/* Secondary stats row */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatCard label="Jobs Sent" value={stats.jobsSent.toLocaleString("id-ID")} sub={`${stats.pendingDeliveries} delivery in flight`} icon={<Send className="h-4 w-4" />} accent="teal" />
-        <StatCard label="Published" value={stats.jobsPublished.toLocaleString("id-ID")} sub="live di Job Portal" icon={<Rocket className="h-4 w-4" />} accent="emerald" />
-        <StatCard label="Needs Enrichment" value={stats.needsEnrichment.toLocaleString("id-ID")} sub={`${stats.rejected} rejected`} icon={<AlertTriangle className="h-4 w-4" />} accent="amber" />
-        <StatCard label="Open Issues" value={stats.openErrors.toLocaleString("id-ID")} sub={`${stats.failedDeliveries} failed deliveries`} icon={<XCircle className="h-4 w-4" />} accent="rose" />
       </div>
     </div>
   );
@@ -283,15 +282,15 @@ export function OverviewView({ live }: { live: boolean }) {
 function OverviewSkeleton() {
   return (
     <div className="space-y-5">
+      {/* 2 baris × 4 KPI — ngikutin grid stat cards final */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="h-24 animate-pulse rounded-xl border border-zinc-800 bg-zinc-900/60" />
+        {Array.from({ length: 8 }).map((_, i) => (
+          <div key={i} className="h-24 animate-pulse rounded-xl border border-border bg-card/60" />
         ))}
       </div>
-      <div className="h-28 animate-pulse rounded-xl border border-zinc-800 bg-zinc-900/60" />
       <div className="grid gap-4 lg:grid-cols-5">
-        <div className="h-72 animate-pulse rounded-xl border border-zinc-800 bg-zinc-900/60 lg:col-span-3" />
-        <div className="h-72 animate-pulse rounded-xl border border-zinc-800 bg-zinc-900/60 lg:col-span-2" />
+        <div className="h-72 animate-pulse rounded-xl border border-border bg-card/60 lg:col-span-3" />
+        <div className="h-72 animate-pulse rounded-xl border border-border bg-card/60 lg:col-span-2" />
       </div>
     </div>
   );

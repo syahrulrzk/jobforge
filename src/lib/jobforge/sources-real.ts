@@ -11,13 +11,17 @@
 //   arbeitnow   https://www.arbeitnow.com/api/job-board-api logo ✗ (enrichment fills it)
 //   remoteok    https://remoteok.com/api                    logo ~ partial
 //   himalayas   https://himalayas.app/jobs/api              logo ✓ salary structured
+//   dealls      https://api.sejutacita.id/v1/explore-job/job  logo ✓ email HR ✓ salary IDR
 //
 // Each board also exports a mapper (mapRemotiveJob, mapJobicyJob, …)
 // reused by the live keyword search (live-search.ts).
 //
-// HR emails are NOT exposed by these boards — per §12.4 the pipeline
-// never guesses: such jobs land in NEEDS_ENRICHMENT and the recovery
-// worker scans the posting page for a real mailto: contact.
+// HR emails: remotive/jobicy/arbeitnow/remoteok/himalayas do NOT expose them
+// — per §12.4 the pipeline never guesses, so such jobs land in
+// NEEDS_ENRICHMENT and the recovery worker scans the posting page for a
+// real mailto: contact. DEALLS is the exception: the Sejutacita API
+// payload embeds the recruiter's email (author.email), so Indonesian jobs
+// ingest with a real HR contact straight to READY.
 // ─────────────────────────────────────────────────────────────
 
 import type { RawJobRecord, ScrapeResult } from "./adapters";
@@ -50,6 +54,7 @@ function stripHtml(html: string): string {
 function mapEmployment(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const v = raw.toLowerCase();
+  if (v.includes("freelance") || v.includes("freelancer") || v.includes("gig")) return "FREELANCE";
   if (v.includes("full")) return "FULL_TIME";
   if (v.includes("part")) return "PART_TIME";
   if (v.includes("contract")) return "CONTRACT";
@@ -274,121 +279,305 @@ async function fetchHimalayas(_cfg?: SourceNetConfig): Promise<ScrapeResult> {
   return { records, pagesScraped: 1, errors: [] };
 }
 
-// ── JobStreet (id.jobstreet.com) ───────────────────────────────
-// JobStreet Indonesia migrated to the SEEK platform domain
-// (www.jobstreet.co.id → id.jobstreet.com) and protects the whole
-// zone with an interactive Cloudflare Turnstile challenge. From a
-// datacenter IP every anonymous path is 403 — measured (Task 16):
-// plain HTTP, stealth headless, headful + Xvfb, Turnstile click.
-// The integration therefore works when EITHER applies:
-//   1. the source has a residential proxyUrl set (HTTP path), or
-//   2. a browser engine (Playwright) runs the fetch and the challenge
-//      auto-passes on the exit IP (also proxy-backed).
-// Listings expose schema.org JSON-LD JobPosting blocks — parsed, no
-// HTML scraping of brittle DOM classes.
+// ── Dealls (api.sejutacita.id) — Indonesian job board ──────────
+// Dealls (dealls.com, parent company Sejutacita) serves its job
+// listings through an OPEN API — measured from this datacenter IP:
+//   GET https://api.sejutacita.id/v1/explore-job/job?page=1&limit=N
+//        &sortParam=mostRelevant&sortBy=asc&boostTheBoostedJob=true
+//        &published=true&status=active[&search=<keyword>]
+//   → 200 JSON, no auth, no Origin header required, no anti-bot.
+// totalDocs ~1.1k active Indonesian postings. Payload carries
+// company (name + CDN logo), city ("Jakarta Selatan"),
+// workplaceType (onSite/hybrid/remote), employmentTypes
+// (fullTime/freelance/contract/internship), skills, salaryRange
+// {start,end} in IDR when published — and the recruiter's email
+// (author.email), which feeds §12 directly.
+// Full description lives on the SSR detail page (/loker/<slug>)
+// inside __NEXT_DATA__ (hiringTeam email + responsibilities HTML);
+// the list API does not include it.
 
-/** Extract all schema.org JobPosting objects from a page's ld+json blocks. */
-export function extractJobPostingsFromHtml(html: string): Record<string, unknown>[] {
-  const out: Record<string, unknown>[] = [];
-  const blocks = html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
-  for (const m of blocks) {
-    try {
-      const parsed: unknown = JSON.parse(m[1].trim());
-      const queue: unknown[] = [parsed];
-      let idx = 0; // index-based walk — preserves document order (LIFO pop would reverse)
-      while (idx < queue.length) {
-        const cur = queue[idx++];
-        if (Array.isArray(cur)) {
-          queue.push(...cur);
-        } else if (cur && typeof cur === "object") {
-          const obj = cur as Record<string, unknown>;
-          if (obj["@graph"]) queue.push(obj["@graph"]);
-          const t = obj["@type"];
-          const type = Array.isArray(t) ? t.map(String).join(",") : String(t ?? "");
-          if (/JobPosting/i.test(type)) out.push(obj);
-        }
-      }
-    } catch {
-      // malformed block — skip it, keep the rest
-    }
-  }
-  return out;
+export const SEJUTACITA_LIST_URL =
+  "https://api.sejutacita.id/v1/explore-job/job?page=1&sortParam=mostRelevant&sortBy=asc&boostTheBoostedJob=true&published=true&status=active";const DEALLS_DETAIL_PREFIX = "https://dealls.com/loker/";
+
+interface SejutacitaJob {
+  id: string;
+  slug: string;
+  role: string;
+  employmentTypes?: string[];
+  workplaceType?: string | null;
+  publishedAt?: string;
+  salaryRange?: { start?: number; end?: number } | null;
+  country?: { name?: string } | null;
+  city?: { name?: string } | null;
+  company?: {
+    name?: string;
+    slug?: string;
+    logoUrl?: string | null;
+    sector?: string | null;
+    insight?: Record<string, unknown> | null;
+  } | null;
+  skills?: { name?: string }[] | null;
+  author?: { email?: string | null } | null;
 }
 
-export function mapJobStreetJob(j: Record<string, unknown>): RawJobRecord | null {
-  const title = clean(j.title);
-  const org = (j.hiringOrganization ?? {}) as Record<string, unknown>;
-  const company = clean(org.name);
-  const url = clean(j.url) ?? clean(j["@id"]);
-  if (!title || !company || !url) return null;
-  const idObj = (j.identifier ?? {}) as Record<string, unknown>;
-  const jobId =
-    clean(idObj.value) ??
-    clean(idObj.name) ??
-    url.split("?")[0].split("/").filter(Boolean).pop() ??
-    url;
-  const logoRaw = org.logo;
-  const logo =
-    typeof logoRaw === "string"
-      ? clean(logoRaw)
-      : Array.isArray(logoRaw)
-        ? clean((logoRaw[0] as Record<string, unknown> | undefined)?.url ?? (logoRaw[0] as string | undefined))
-        : clean((logoRaw as Record<string, unknown> | undefined)?.url);
-  const locs = Array.isArray(j.jobLocation) ? j.jobLocation : j.jobLocation ? [j.jobLocation] : [];
-  const locName = locs
-    .map((l) => {
-      const addr = ((l as Record<string, unknown> | undefined)?.address ?? {}) as Record<string, unknown>;
-      return [addr.addressLocality, addr.addressRegion].filter(Boolean).map(String).join(", ");
-    })
-    .filter(Boolean)[0] ?? null;
-  const salary = (j.baseSalary ?? {}) as Record<string, unknown>;
-  const money = (salary.value ?? {}) as Record<string, unknown>;
+function mapWorkplaceDealls(raw: string | null | undefined): string | null {
+  const v = String(raw ?? "").toLowerCase();
+  if (v === "remote") return "REMOTE";
+  if (v === "hybrid") return "HYBRID";
+  if (v === "onsite" || v === "on_site" || v === "on site") return "ONSITE";
+  return null;
+}
+
+export function mapDeallsJob(j: SejutacitaJob): RawJobRecord | null {
+  const title = clean(j.role);
+  const company = clean(j.company?.name);
+  const jobSlug = String(j.slug ?? "").trim();
+  const companySlug = String(j.company?.slug ?? "").trim();
+  if (!title || !company || !jobSlug || !companySlug) return null;
+  const sourceUrl = `${DEALLS_DETAIL_PREFIX}${encodeURIComponent(jobSlug)}~${encodeURIComponent(companySlug)}`;
   const salaryText =
-    money.minValue && money.maxValue
-      ? `${String(salary.currency ?? "IDR")} ${Number(money.minValue).toLocaleString("id-ID")} - ${Number(money.maxValue).toLocaleString("id-ID")} /${String(salary.unitText ?? "month")}`
+    j.salaryRange?.start && j.salaryRange?.end
+      ? `IDR ${Number(j.salaryRange.start).toLocaleString("id-ID")} - ${Number(j.salaryRange.end).toLocaleString("id-ID")} per bulan`
+      : null;
+  const email = clean(j.author?.email) ?? null;
+  const emailOk =
+    email &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) &&
+    !/noreply|no-reply|sejutacita\.id|dealls\.com/i.test(email)
+      ? email
       : null;
   return {
-    sourcePlatform: "jobstreet",
-    sourceJobId: `js-${String(jobId).slice(0, 100)}`,
-    sourceUrl: url,
+    sourcePlatform: "dealls",
+    sourceJobId: `dealls-${j.id}`.slice(0, 120),
+    sourceUrl,
     rawTitle: title,
     rawCompanyName: company,
-    rawCompanyLogoUrl: logo,
-    rawCompanyWebsite: null,
-    rawCompanyProfile: null,
-    rawDescription: stripHtml(String(j.description ?? "")) || null,
+    rawCompanyLogoUrl: clean(j.company?.logoUrl) ?? null,
+    // slug perusahaan tersedia dari sourceUrl detail job (…/loker/<job>~<companySlug>)
+    // — profil asli di-fetch di tahap company enrichment (engine.ts)
+    rawCompanyWebsite: companySlug ? `https://dealls.com/company/${encodeURIComponent(companySlug)}` : null,
+    rawCompanyProfile: null, // profil asli perusahaan di-fetch terpisah (§11 engine)
+    rawDescription: null, // filled by the detail-page fetch below
     rawSalaryText: salaryText,
-    rawLocation: locName ?? "Indonesia",
-    rawEmploymentType: mapEmployment(String(j.employmentType ?? "")),
-    rawWorkplaceType: String(j.jobLocationType ?? "") === "TELECOMMUTE" ? "REMOTE" : null,
+    rawLocation: clean(j.city?.name) ?? clean(j.country?.name) ?? "Indonesia",
+    rawEmploymentType: mapEmployment((j.employmentTypes ?? [])[0] ?? null),
+    rawWorkplaceType: mapWorkplaceDealls(j.workplaceType),
     rawRequirements: [],
-    rawSkills: Array.isArray(j.skills) ? j.skills.map((s) => String(s)).slice(0, 6) : [],
-    careerPageUrl: url,
-    publishedEmail: null, // JobStreet keeps applications on-site — email gate applies downstream
-    scrapedAt: isoDate(j.datePosted),
+    rawSkills: (j.skills ?? []).map((s) => String(s.name ?? "").trim()).filter(Boolean).slice(0, 6),
+    careerPageUrl: sourceUrl,
+    publishedEmail: emailOk,
+    scrapedAt: isoDate(j.publishedAt),
   };
 }
 
-/** SEO listing URL: /id/{kata-dengan-dash}-jobs — JobStreet's canonical keyword page. */
-export function jobStreetSearchUrl(rawQuery: string): string {
-  const slug = rawQuery
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "")
-    .slice(0, 80);
-  return `https://id.jobstreet.com/id/${slug || "jobs"}-jobs`;
+/**
+ * Extract the full job detail from the SSR detail page's __NEXT_DATA__.
+ * Struktur terukur 2026-09-17: detail job ada di React Query cache
+ * pageProps.dehydratedState.queries[0].state.data — field description
+ * sering kosong, konten asli di responsibilities (HTML) + requirements
+ * (HTML), dan skills lengkap di candidatePreference.skills [{name}].
+ * Fallback struktur lama pageProps.job tetap didukung.
+ */
+export function extractDeallsDetail(html: string): {
+  description: string | null;
+  requirements: string | null;
+  skills: string[];
+} | null {
+  const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (!m) return null;
+  try {
+    const data = JSON.parse(m[1]) as {
+      props?: { pageProps?: { job?: Record<string, unknown>; dehydratedState?: { queries?: { state?: { data?: unknown } }[] } } };
+    };
+    const pp = data.props?.pageProps;
+    let job: Record<string, unknown> | undefined = pp?.job;
+    if (!job) {
+      const q0 = pp?.dehydratedState?.queries?.[0]?.state?.data;
+      if (q0 && typeof q0 === "object") job = (q0 as Record<string, unknown>).job as Record<string, unknown> ?? (q0 as Record<string, unknown>);
+    }
+    if (!job || typeof job !== "object") return null;
+    const descHtml = typeof job.description === "string" ? job.description : "";
+    const respHtml = typeof job.responsibilities === "string" ? job.responsibilities : "";
+    const reqHtml = typeof job.requirements === "string" ? job.requirements : "";
+    const parts: string[] = [];
+    const pushSection = (label: string, html2: string) => {
+      const text = stripHtml(html2);
+      if (text.length >= 30) parts.push(`${label}:\n${text}`);
+    };
+    pushSection("Deskripsi", descHtml);
+    pushSection("Tanggung Jawab", respHtml);
+    pushSection("Kualifikasi", reqHtml);
+    const skills: string[] = [];
+    const pref = job.candidatePreference as Record<string, unknown> | undefined;
+    const skillsRaw = (pref?.skills ?? job.skills) as unknown;
+    if (Array.isArray(skillsRaw)) {
+      for (const s of skillsRaw) {
+        if (s && typeof s === "object") {
+          const n = String((s as Record<string, unknown>).name ?? "").trim();
+          if (n) skills.push(n);
+        } else if (typeof s === "string" && s.trim()) {
+          skills.push(s.trim());
+        }
+      }
+    }
+    return {
+      description: parts.length > 0 ? parts.join("\n\n").slice(0, MAX_DESCRIPTION) : null,
+      requirements: reqHtml ? stripHtml(reqHtml).slice(0, MAX_DESCRIPTION) : null,
+      skills: skills.slice(0, 12),
+    };
+  } catch {
+    return null;
+  }
 }
 
-async function fetchJobStreet(cfg: SourceNetConfig): Promise<ScrapeResult> {
-  const url = "https://id.jobstreet.com/id/jobs"; // general listing — keyword runs go through live-search
-  const { ok, status, text } = await sourceFetchText(url, cfg, { ua: "browser", timeoutMs: 15_000 });
-  if (!ok) throw new Error(`${url} responded ${status}${status === 403 ? " — Cloudflare challenge (set proxy residensial di source)" : ""}`);
-  const records = extractJobPostingsFromHtml(text)
-    .map(mapJobStreetJob)
-    .filter((r): r is RawJobRecord => r !== null);
-  if (records.length === 0) throw new Error("halaman terbuka tapi tidak ada JSON-LD JobPosting — kemungkinan masih di challenge");
-  return { records, pagesScraped: 1, errors: [] };
+/** Backward-compatible wrapper: deskripsi rapi saja. */
+export function extractDeallsDescription(html: string): string | null {
+  return extractDeallsDetail(html)?.description ?? null;
 }
+
+/**
+ * Profil perusahaan ASLI dari API perusahaan Sejutacita (bukan karangan):
+ *   GET /v1/job-portal/company/slug/<slug> → description (HTML), website,
+ *   size {start,end}, sector, logoUrl — semuanya ter-publish oleh perusahaan
+ *   di Dealls. Tidak ada field yang dikonstruksi (§12.4). Cache in-process
+ *   per slug — satu perusahaan banyak lowongan.
+ */
+const deallsCompanyCache = new Map<string, { profile: string | null; website: string | null; logoUrl: string | null; sector: string | null; size: string | null }>();
+
+function deallsSizeLabel(size: unknown): string | null {
+  if (!size || typeof size !== "object") return null;
+  const s = size as { start?: number | null; end?: number | null };
+  if (s.start && s.end) return `${s.start}-${s.end} karyawan`;
+  if (s.start) return `${s.start}+ karyawan`;
+  return null;
+}
+
+export async function fetchDeallsCompanyProfile(
+  companySlug: string,
+  cfg?: SourceNetConfig,
+): Promise<{ profile: string | null; website: string | null; logoUrl: string | null; sector: string | null; size: string | null } | null> {
+  const slug = companySlug.trim();
+  if (!slug) return null;
+  const cached = deallsCompanyCache.get(slug);
+  if (cached) return cached;
+  try {
+    const data = (await getJson(`https://api.sejutacita.id/v1/job-portal/company/slug/${encodeURIComponent(slug)}`)) as {
+      data?: { result?: Record<string, unknown> };
+    };
+    const c = data.data?.result;
+    if (!c || typeof c !== "object") {
+      deallsCompanyCache.set(slug, { profile: null, website: null, logoUrl: null, sector: null, size: null });
+      return null;
+    }
+    const descHtml = typeof c.description === "string" ? c.description : "";
+    const profile = stripHtml(descHtml).length >= 30 ? stripHtml(descHtml).slice(0, 2_000) : null;
+    const website = clean(c.website) ?? null;
+    const logoUrl = clean(c.logoUrl) ?? null;
+    const sector = clean(c.sector) ?? null;
+    const size = deallsSizeLabel(c.size);
+    const out = { profile, website, logoUrl, sector, size };
+    deallsCompanyCache.set(slug, out);
+    return out;
+  } catch {
+    return null; // API gagal — honest null, pipeline lanjut tanpa profil
+  }
+}
+
+/**
+ * Fill rawDescription (dan skills + profil perusahaan) for Dealls records by
+ * fetching their SSR detail pages (list API has no description — the pipeline
+ * REJECTS records without one). Deskripsi dirangkai rapi: Deskripsi /
+ * Tanggung Jawab / Kualifikasi (dari dehydratedState detail page); skills
+ * di-merge dari candidatePreference.skills bila lebih lengkap dari payload
+ * listing; profil perusahaan diambil ASLI dari API perusahaan Sejutacita
+ * (description/website/logo/sector/size ter-publish — bukan karangan).
+ * Low concurrency + one retry per page: the Next.js SSR pages throttle a
+ * 6-wide burst from one IP (measured: 18/30 descriptions empty on the first
+ * scheduled run). Fallback = meta description from the same page. Records
+ * still missing a description are returned unchanged — the pipeline treats
+ * them honestly per §12.4 instead of fabricating text.
+ */
+export async function enrichDeallsDescriptions(
+  records: RawJobRecord[],
+  cfg?: SourceNetConfig,
+  cap = 30,
+): Promise<{ records: RawJobRecord[]; pagesScraped: number; allDescriptionsEmpty: boolean }> {
+  const CONCURRENCY = 3;
+  const slice = records.slice(0, cap);
+  const filled = new Map<number, { description: string; skills: string[] | null }>();
+  const fetchOne = async (slugPair: string): Promise<{ description: string; skills: string[] | null } | null> => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const { ok, text } = await sourceFetchText(`${DEALLS_DETAIL_PREFIX}${slugPair}`, cfg ?? {}, {
+          ua: "browser",
+          timeoutMs: 12_000,
+        });
+        if (ok) {
+          const detail = extractDeallsDetail(text);
+          if (detail?.description) return { description: detail.description, skills: detail.skills.length > 0 ? detail.skills : null };
+          // fallback — meta description selalu di-render SSR Dealls
+          const meta = text.match(/<meta[^>]+name=["']description["'][^>]+content=("[^"]*"|'[^']*')/i);
+          if (meta) {
+            const raw = meta[1].slice(1, -1).replace(/&amp;/g, "&").replace(/&quot;/g, '"');
+            if (raw.trim().length >= 30) return { description: `Ringkasan lowongan: ${raw.trim()}`.slice(0, MAX_DESCRIPTION), skills: null };
+          }
+        }
+      } catch {
+        // retry / give up — honest downstream handling
+      }
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 800));
+    }
+    return null;
+  };
+  for (let i = 0; i < slice.length; i += CONCURRENCY) {
+    const chunk = slice.slice(i, i + CONCURRENCY);
+    await Promise.all(
+      chunk.map(async (rec, j) => {
+        const slugPair = rec.sourceUrl.replace(DEALLS_DETAIL_PREFIX, "");
+        const detail = await fetchOne(slugPair);
+        if (detail) filled.set(i + j, detail);
+      }),
+    );
+  }
+  // Profil perusahaan ASLI via API perusahaan (cache in-process, sekali per slug)
+  const companySlugs = new Set(
+    slice
+      .map((r) => (r.rawCompanyWebsite ?? "").replace("https://dealls.com/company/", ""))
+      .filter(Boolean),
+  );
+  await Promise.all([...companySlugs].map((slug) => fetchDeallsCompanyProfile(slug, cfg)));
+  const out: RawJobRecord[] = records.map((rec, i) => {
+    const detail = filled.get(i);
+    if (detail === undefined) return rec;
+    // skills: merge — detail page lebih lengkap dari listing (listing kadang cuma 2)
+    const mergedSkills =
+      detail.skills && detail.skills.length > rec.rawSkills.length ? detail.skills : rec.rawSkills;
+    return { ...rec, rawDescription: detail.description, rawSkills: mergedSkills };
+  });
+  return {
+    records: out,
+    pagesScraped: 1 + Math.ceil(slice.length / CONCURRENCY),
+    allDescriptionsEmpty: slice.length > 0 && filled.size === 0,
+  };
+}
+
+async function fetchDealls(cfg?: SourceNetConfig): Promise<ScrapeResult> {
+  const data = (await getJson(`${SEJUTACITA_LIST_URL}&limit=30`)) as {
+    data?: { docs?: SejutacitaJob[] };
+  };
+  const docs = data.data?.docs ?? [];
+  const mapped = docs.map(mapDeallsJob).filter((r): r is RawJobRecord => r !== null);
+  const { records, pagesScraped, allDescriptionsEmpty } = await enrichDeallsDescriptions(mapped, cfg, 30);
+  const errors: { type: ErrorType; message: string }[] = [];
+  if (mapped.length > 0 && allDescriptionsEmpty) {
+    errors.push({ type: "PARSER_ERROR", message: "Dealls: semua detail page gagal di-fetch — description kosong" });
+  }
+  return { records, pagesScraped, errors };
+}
+
+// ── LinkedIn & JobStreet/Glints integrations removed (direktif user):
+// fokus scraping ke Dealls (Sejutacita API). Fitur Cari Email tetap jalan
+// — scanPageForEmailBrowser (browser-boards.ts) masih dipakai company-email.ts.
 
 export const REAL_BOARDS: Record<string, ((cfg: SourceNetConfig) => Promise<ScrapeResult>) | undefined> = {
   remotive: fetchRemotive,
@@ -396,7 +585,7 @@ export const REAL_BOARDS: Record<string, ((cfg: SourceNetConfig) => Promise<Scra
   arbeitnow: fetchArbeitnow,
   remoteok: fetchRemoteOk,
   himalayas: fetchHimalayas,
-  jobstreet: fetchJobStreet,
+  dealls: fetchDealls,
 };
 
 export function realBoardError(sourceName: string, err: unknown): { type: ErrorType; message: string } {

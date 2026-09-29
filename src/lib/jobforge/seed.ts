@@ -6,7 +6,9 @@ import { DEFAULT_ENGINE_POOL } from "./engines";
 // JOBFORCE — Initial seed (idempotent, anti-spam).
 // Hanya menanam SOURCES + SETTINGS. Tidak ada lagi job/companies
 // mock — data real mengalir dari public job boards via worker
-// engine (sources-real.ts REAL_BOARDS). Board portal tanpa
+// engine (sources-real.ts REAL_BOARDS): 5 board internasional
+// (remotive/jobicy/arbeitnow/remoteok/himalayas) + Dealls Indonesia
+// (api.sejutacita.id — email HR ikut di payload). Board portal tanpa
 // integrasi real ditanam INACTIVE: tidak pernah generate data palsu.
 // ─────────────────────────────────────────────────────────────
 

@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -15,7 +15,7 @@ datasource db {
 // §8 Source Management
 model Source {
   id          String      @id @default(cuid())
-  slug        String      @unique // source_id: jobstreet, glints, indeed, ...
+  slug        String      @unique // source_id: dealls, remotive, ...
   name        String
   baseUrl     String
   type        String      @default("JOB_PORTAL") // JOB_PORTAL | CAREER_SITE | PUBLIC_SOURCE
@@ -46,11 +46,13 @@ model Company {
   website        String?
   profile        String
   industry       String?
+  size           String? // jumlah karyawan ("51-200"/"500+") — dari JSON-LD/heuristik About
   enrichedAt     DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
   jobs Job[]
+  harvestedContacts HarvestedContact[]
 
   @@index([normalizedName])
 }
@@ -59,6 +61,7 @@ model Company {
 // Failure: FAILED | REJECTED | NEEDS_ENRICHMENT
 model Job {
   id              String    @id @default(cuid())
+  code            String    @unique // ID publik readable: JOBS00001, JOBS00002, … — wajib diisi via allocateJobCode()
   fingerprint     String    @unique // §15 SHA256(normalized_company + normalized_title + normalized_location)
   title           String
   normalizedTitle String
@@ -77,6 +80,16 @@ model Job {
   statusReason    String? // why NEEDS_ENRICHMENT / REJECTED
   scrapedAt       DateTime  @default(now())
   publishedAt     DateTime?
+  // Flag konsumsi API pull (§19b) — model lease/ack:
+  //   GET /api/v1/jobs/pull → job di-LEASE (pullLeaseUntil = now+N menit):
+  //   tersembunyi dari pull lain & dari delivery portal, TAPI belum final.
+  //   POST /api/v1/jobs/pull {action:"ack"} → FINAL (pulledAt): tidak
+  //   muncul lagi di pull manapun.
+  //   Lease kadaluarsa / release → job otomatis balik ke pool.
+  pulledAt        DateTime?
+  pulledByTokenId String?
+  pullCount       Int       @default(0)
+  pullLeaseUntil  DateTime? // sedang di-lease ke sebuah token sampai waktu ini (null = tidak di-lease)
   companyId       String?
   company         Company?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
 
@@ -119,6 +132,27 @@ model JobContact {
   job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
 
   @@index([emailStatus])
+}
+
+// Tools · Cari Email (mode Harvest) — semua email publik per domain
+// ala hunter.io, hasil harvest dari internet (crawl/search/BBOT).
+// Tidak ada email konstruksi — hanya yang benar-benar ter-publish.
+model HarvestedContact {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  companyId   String?
+  company     Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  domain      String // domain saat harvest
+  kind        String   @default("unknown") // role | personal | unknown
+  category    String? // Info/Kontak | Support/CS | Sales/Marketing | HR/Rekrutmen | …
+  via         String   @default("harvest") // crawl | search | bbot | gabungan
+  sourceUrl   String?
+  sourcesJson String   @default("[]") // JSON string[] — semua halaman sumber
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([domain])
+  @@index([companyId])
 }
 
 // §24 Scrape Run
@@ -184,6 +218,47 @@ model ApiDelivery {
 
   @@index([status])
   @@index([jobId])
+  @@index([createdAt])
+}
+
+// §19b API Consumer Token — auth Bearer untuk GET /api/v1/jobs/pull.
+// Token disimpan sebagai SHA256 hash (raw token hanya terlihat sekali saat create).
+model ApiToken {
+  id          String    @id @default(cuid())
+  name        String // label bebas: "Portal Produksi", "Dashboard Internal", …
+  tokenHash   String    @unique // SHA256(raw token)
+  tokenPrefix String // 12 char pertama raw token — identifikasi di UI tanpa menyimpan raw
+  status      String    @default("ACTIVE") // ACTIVE | REVOKED
+  lastUsedAt  DateTime?
+  pullCount   Int       @default(0) // total job yang sudah ditarik via token ini
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  pullLogs    ApiPullLog[]
+
+  @@index([status])
+}
+
+// §19b Riwayat konsumsi — satu baris per aksi pull API per job
+// (LEASE saat GET pull, ACK saat konfirmasi final, RELEASE saat
+// dikembalikan ke pool). Job snapshot disimpan sebagai JSON supaya
+// riwayat tetap terbaca walau job/company sudah terhapus.
+model ApiPullLog {
+  id        String   @id @default(cuid())
+  tokenId   String
+  jobId     String
+  jobCode   String // snapshot kode (JOBS####)
+  jobTitle  String // snapshot judul
+  action    String // LEASE | ACK | RELEASE
+  leaseMin  Int? // durasi lease (menit) utk aksi LEASE
+  metaJson  String   @default("{}") // snapshot payload ringkas (source platform, url, dst.)
+  createdAt DateTime @default(now())
+
+  token ApiToken @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([tokenId])
+  @@index([jobId])
+  @@index([action])
   @@index([createdAt])
 }
 

@@ -69,6 +69,9 @@ export const canonicalJobSchema = z.object({
   }),
   company: z.object({
     name: z.string().min(1),
+    // logo_url WAJIB (§11): resolveLogoUrl dijamin mengembalikan sesuatu —
+    // favicon provider (website/nama→domain) atau badge SVG deterministik.
+    // JobStreet/Glints tidak ekspos logo, tapi di-resolve via nama→domain.
     logo_url: z.string().min(1),
     website: z.string().url().optional().nullable(),
     profile: z.string().min(1),

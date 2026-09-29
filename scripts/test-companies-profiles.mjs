@@ -1,0 +1,17 @@
+import { chromium } from "playwright";
+const browser = await chromium.launch({ headless: true, channel: "chrome", args: ["--no-sandbox"] });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+const errs = [];
+page.on("pageerror", (e) => errs.push(String(e).slice(0, 100)));
+await page.goto("http://localhost:3000", { waitUntil: "networkidle", timeout: 60000 });
+await page.waitForTimeout(2000);
+await page.getByRole("button", { name: /^companies$/i }).first().click();
+await page.waitForTimeout(3000);
+const body = await page.locator("body").innerText();
+const industryShown = /Industri belum diketahui|karyawan/i.test(body);
+const profileShown = body.includes("Profil perusahaan belum tersedia.") ? "placeholder" : "deskripsi nyata";
+await page.screenshot({ path: "download/companies-profiles.png" });
+console.log("industri/size tampil:", industryShown ? "✓" : "tidak");
+console.log("profil:", profileShown);
+console.log("pageerrors:", errs.length === 0 ? "TIDAK ADA ✓" : errs);
+await browser.close();

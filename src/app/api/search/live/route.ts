@@ -21,12 +21,14 @@ export async function POST(req: NextRequest) {
   const selectedSlugs = Array.isArray(body?.sources)
     ? body.sources.filter((s: unknown): s is string => typeof s === "string" && s.trim().length > 0)
     : undefined;
+  // filter perusahaan: nama ("sim group") atau domain ("simgroup.co.id")
+  const companyFilter = typeof body?.company === "string" ? body.company : undefined;
   if (inFlight) {
     return NextResponse.json({ error: "Ada live scrape yang sedang berjalan — tunggu sebentar" }, { status: 429 });
   }
   inFlight = true;
   try {
-    const result = await liveKeywordScrape(q, selectedSlugs);
+    const result = await liveKeywordScrape(q, selectedSlugs, companyFilter);
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json(

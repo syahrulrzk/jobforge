@@ -11,15 +11,25 @@ export async function GET(req: NextRequest) {
   const page = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
   const pageSize = Math.min(60, Math.max(6, parseInt(sp.get("pageSize") ?? "12", 10) || 12));
   const q = sp.get("q")?.trim() ?? "";
+  // default: hanya perusahaan yang punya email (harvest/HR) — ?hasEmail=false untuk semua
+  const hasEmailOnly = sp.get("hasEmail") !== "false";
 
-  const where = q ? { name: { contains: q } } : {};
+  // perusahaan "punya email" = ada JobContact (HR) ATAU HarvestedContact (harvest)
+  const emailFilter = {
+    OR: [{ jobs: { some: { contact: { isNot: null } } } }, { harvestedContacts: { some: {} } }],
+  };
+
+  const where = {
+    ...(q ? { name: { contains: q } } : {}),
+    ...(hasEmailOnly ? emailFilter : {}),
+  };
 
   const [total, companies] = await Promise.all([
     db.company.count({ where }),
     db.company.findMany({
       where,
       include: {
-        _count: { select: { jobs: true } },
+        _count: { select: { jobs: true, harvestedContacts: true } },
         jobs: {
           orderBy: { scrapedAt: "desc" },
           take: 1,
@@ -43,16 +53,19 @@ export async function GET(req: NextRequest) {
       const activeJobs = await db.job.count({
         where: { companyId: c.id, status: { in: ["READY", "SENT", "PUBLISHED"] } },
       });
+      const harvestCount = await db.harvestedContact.count({ where: { companyId: c.id } });
       return {
         id: c.id,
         name: c.name,
         logoUrl: c.logoUrl,
         website: c.website,
         industry: c.industry,
+        size: c.size,
         profile: c.profile,
         jobCount: c._count.jobs,
         activeJobs,
         hrContacts: contacts,
+        harvestEmailCount: harvestCount,
         lastJob: c.jobs[0] ?? null,
         enrichedAt: c.enrichedAt,
       };

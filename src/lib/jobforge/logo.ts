@@ -30,10 +30,103 @@ export function duckduckgoIconUrl(domain: string): string {
   return `https://icons.duckduckgo.com/ip3/${domain}`;
 }
 
-/** Best direct PNG link to persist in DB — Google's CDN resolves the actual image at display time. */
-export function resolveLogoUrl(website: string | null | undefined): string | null {
+// ─────────────────────────────────────────────────────────────
+// Nama → domain (Clearbit Autocomplete — free, no auth).
+// Terukur 2026-09-12: jalan untuk perusahaan Indonesia
+// ("sevima" → sevima.com, "bank mandiri" → bankmandiri.co.id).
+// Dipakai ketika board tidak mengekspos website perusahaan
+// (JobStreet/Glints) — domain dibutuhkan untuk resolve logo.
+// ─────────────────────────────────────────────────────────────
+const NAME_TIMEOUT_MS = 5000;
+const nameDomainCache = new Map<string, string | null>();
+
+export function cleanCompanyName(name: string): string {
+  return name
+    .replace(/^(pt|cv|cv\.|pt\.)/gi, " ")
+    .replace(/\b(tbk|persero|indonesia)\b/gi, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export async function resolveDomainFromName(name: string | null | undefined): Promise<string | null> {
+  const q = cleanCompanyName(name ?? "");
+  if (q.length < 2) return null;
+  const cacheKey = q.toLowerCase();
+  if (nameDomainCache.has(cacheKey)) return nameDomainCache.get(cacheKey) ?? null;
+  try {
+    const res = await fetch(
+      `https://autocomplete.clearbit.com/v1/companies/suggest?query=${encodeURIComponent(q)}`,
+      { signal: AbortSignal.timeout(NAME_TIMEOUT_MS) }
+    );
+    if (!res.ok) {
+      nameDomainCache.set(cacheKey, null);
+      return null;
+    }
+    const list = (await res.json()) as { domain?: string }[];
+    const domain = list?.[0]?.domain ?? null;
+    nameDomainCache.set(cacheKey, domain);
+    return domain;
+  } catch {
+    nameDomainCache.set(cacheKey, null);
+    return null;
+  }
+}
+
+/**
+ * URL logo terbaik untuk disimpan di DB. Rantai (logo = field wajib, jadi
+ * fungsi ini dijamin mengembalikan sesuatu untuk nama yang valid):
+ *   1. website domain        → Google favicon 128px (logo asli brand)
+ *   2. nama perusahaan       → Clearbit autocomplete (domain) → Google favicon
+ *   3. fallback terakhir     → badge SVG brand-color deterministik (data URI)
+ */
+export async function resolveLogoUrl(
+  website: string | null | undefined,
+  companyName?: string | null
+): Promise<string | null> {
+  const domain = extractDomain(website) ?? (await resolveDomainFromName(companyName));
+  if (domain) return googleFaviconUrl(domain, 128);
+  const clean = cleanCompanyName(companyName ?? "");
+  if (clean.length >= 2) return svgBadgeDataUri(clean);
+  return null;
+}
+
+/** Brand badge SVG sebagai data URI — dipakai ketika tidak ada provider yang punya brand. */
+export function svgBadgeDataUri(seed: string): string {
+  const safe = seed.toLowerCase().replace(/[^a-z0-9.]/g, "") || "x";
+  const svg = generateLogoBadge(safe);
+  return `data:image/svg+xml;base64,${Buffer.from(svg, "utf8").toString("base64")}`;
+}
+
+/**
+ * Logo aman-portal: portal tujuan (Karivia) memvalidasi company.logo_url dgn
+ * URL validator strict (http/https saja) — data URI badge SVG internal kita
+ * ditolak 422. Fungsi ini mengkonversi nilai logo apapun di DB menjadi URL
+ * publik yang valid TANPA mengubah data di DB:
+ *   1. sudah http(s)          → dipakai apa adanya
+ *   2. data URI / lainnya     → Google favicon dari domain website perusahaan
+ *   3. tanpa domain           → placeholder publik inisial nama (placehold.co)
+ */
+export function portalSafeLogoUrl(
+  logoUrl: string | null | undefined,
+  website: string | null | undefined,
+  companyName: string | null | undefined
+): string {
+  const v = (logoUrl ?? "").trim();
+  if (/^https?:\/\//i.test(v)) return v;
   const domain = extractDomain(website);
-  return domain ? googleFaviconUrl(domain, 128) : null;
+  if (domain) return googleFaviconUrl(domain, 128);
+  // Inisial dari maksimal 2 kata pertama nama perusahaan → placeholder publik.
+  const initials = (companyName ?? "")
+    .replace(/^(pt|cv)\b/gi, "")
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((w) => w[0] ?? "")
+    .join("")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "") || "JB";
+  return `https://placehold.co/128x128/png?text=${encodeURIComponent(initials)}`;
 }
 
 const FETCH_TIMEOUT_MS = 4000;

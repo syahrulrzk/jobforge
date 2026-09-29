@@ -1,0 +1,24 @@
+FROM oven/bun:1.4-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package.json bun.lockb ./
+RUN bun install --production
+
+# Copy worker and scraper packages
+COPY services/worker ./services/worker
+COPY services/scraper ./services/scraper
+COPY packages ./packages
+COPY prisma ./prisma
+
+# Generate Prisma client
+RUN cd prisma && bunx prisma generate
+
+# Install Playwright browsers
+RUN bunx playwright install chromium
+
+WORKDIR /app/services/worker
+
+# Start scraper worker
+CMD ["bun", "run", "dev"]

@@ -9,10 +9,14 @@ import {
   validateJob,
 } from "./pipeline";
 import { processBulkImport, generateRequestId } from "./portal";
-import { DELIVERY_ENDPOINT, SETTING_KEYS, type CanonicalJob } from "./types";
-import { extractDomain, resolveLogoUrl } from "./logo";
+import { bulkImportSchema, DELIVERY_ENDPOINT, SETTING_KEYS, type CanonicalJob } from "./types";
+import { extractDomain, resolveLogoUrl, portalSafeLogoUrl } from "./logo";
+import { enrichCompanyProfile, deriveProfileFromJobs } from "./company-enrich";
 import { ENGINES, engineJitter, parseEngineList, parseEnginePool, rotateEngine, type EngineKey } from "./engines";
-import { REAL_BOARDS, realBoardError } from "./sources-real";
+import { REAL_BOARDS, realBoardError, fetchDeallsCompanyProfile } from "./sources-real";
+import { allocateJobCode } from "./job-code";
+import { findCompanyHrEmail } from "./company-email";
+import { Prisma } from "@prisma/client";
 
 // ─────────────────────────────────────────────────────────────
 // JOBFORCE — Worker Engine (PRD §22, §36, §41)
@@ -25,12 +29,16 @@ interface EngineState {
   instance: string;
   timer: ReturnType<typeof setInterval> | null;
   ticking: boolean;
+  tickStartedAt: number; // watchdog: deteksi tick yang menggantung
+  scrapeMutex: Promise<void>; // serialize scrape: auto-tick & manual run tidak boleh overlap
+  scrapeBusy: boolean; // true selama scrape di dalam mutex (dipakai tick untuk skip)
   tickCount: number;
   settings: Map<string, string>;
   settingsLoadedAt: number;
   sourceCursor: number;
   engineCursor: number;
   mailtoScanned: Set<string>; // jobIds already scanned for a real mailto contact
+  profileEnriched: Set<string>; // companyIds yang sudah di-enrich profil website-nya
 }
 
 const g = globalThis as unknown as { __jobforgeEngine?: EngineState };
@@ -45,13 +53,21 @@ function state(): EngineState {
       instance: MODULE_INSTANCE,
       timer: null,
       ticking: false,
+      tickStartedAt: 0,
+      scrapeMutex: Promise.resolve(),
+      scrapeBusy: false,
       tickCount: 0,
       settings: new Map(),
       settingsLoadedAt: 0,
       sourceCursor: 0,
       engineCursor: 0,
       mailtoScanned: new Set(),
+      profileEnriched: new Set(),
     };
+    // Self-heal setelah HMR: module baru dievaluasi → timer lama sudah
+    // diclear di atas, tapi ensureBootstrap (cached global) tidak akan
+    // dipanggil lagi → tick mati diam-diam. Re-arm otomatis di sini.
+    setTimeout(() => startEngine(), 0);
   }
   return g.__jobforgeEngine;
 }
@@ -133,8 +149,11 @@ async function canonicalFor(jobId: string): Promise<CanonicalJob | null> {
     source: { platform: link.source.slug, job_id: link.sourceJobId, url: link.sourceUrl },
     company: {
       name: job.company.name,
-      logo_url: job.company.logoUrl,
-      website: job.company.website ?? null,
+      // Portal validasi logo_url dgn URL strict — data URI badge SVG internal
+      // ditolak 422. Konversi ke URL publik valid; DB tidak diubah.
+      logo_url: portalSafeLogoUrl(job.company.logoUrl, job.company.website, job.company.name),
+      // "" diperlakukan null — z.string().url() menolak string kosong
+      website: job.company.website || null,
       profile: job.company.profile,
     },
     job: {
@@ -161,7 +180,54 @@ async function canonicalFor(jobId: string): Promise<CanonicalJob | null> {
 
 type ScrapeAttempt = { records: RawJobRecord[]; pagesScraped: number; errors: { type: string; message: string }[] };
 
+// Mutex sederhana (chained promise): scrape berikutnya nunggu scrape sebelumnya
+// selesai. Mencegah auto-tick + manual run (atau dua manual run) scraping source
+// yang sama secara paralel → run duplikat + race insert + ban IP dari board.
+/**
+ * Insert link provenance JobSource tahan-race: pada @@unique([sourceId, sourceJobId]),
+ * dua run paralel (proses berbeda / race check-then-insert) bisa nyisipin link yang
+ * sama — P2002 dianggap sukses karena data yang diminta memang sudah ada.
+ */
+async function insertJobSourceSafe(data: {
+  jobId: string;
+  sourceId: string;
+  sourceJobId: string;
+  sourceUrl: string;
+}): Promise<void> {
+  try {
+    await db.jobSource.create({ data });
+  } catch (err) {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== "P2002") throw err;
+  }
+}
+
+let insideScrapeMutex = false;
+
 async function runScrapeForSource(sourceId: string, forced = false): Promise<void> {
+  const s = state();
+  // Re-entrant: dipanggil dari dalam mutex (tick loop) → jalan langsung.
+  if (insideScrapeMutex) return runScrapeForSourceInner(sourceId, forced);
+  // Tick gak perlu nunggu scrape panjang — cukup tahu bahwa ada scrape lagi jalan.
+  if (s.scrapeBusy) {
+    void log("scrape", "info", "Scrape masih berjalan — tick skip siklus ini");
+    return;
+  }
+  const prev = s.scrapeMutex;
+  let release!: () => void;
+  s.scrapeMutex = new Promise<void>((resolve) => (release = resolve));
+  s.scrapeBusy = true;
+  await prev.catch(() => undefined); // tunggu scrape sebelumnya kelar
+  insideScrapeMutex = true;
+  try {
+    await runScrapeForSourceInner(sourceId, forced);
+  } finally {
+    insideScrapeMutex = false;
+    s.scrapeBusy = false;
+    release();
+  }
+}
+
+async function runScrapeForSourceInner(sourceId: string, forced = false): Promise<void> {
   const source = await db.source.findUnique({ where: { id: sourceId } });
   if (!source) return;
   if (!forced && source.status === "INACTIVE") return;
@@ -282,8 +348,16 @@ async function runScrapeForSource(sourceId: string, forced = false): Promise<voi
   let created = 0;
   let updated = 0;
   let duplicated = 0;
+  let rejectedNoCompany = 0;
 
   for (const rec of result.records) {
+    // DIREKTIF USER: record TANPA nama perusahaan TIDAK BOLEH masuk DB.
+    // Tidak ada fingerprint "unknown" — langsung dibuang dan dihitung rejected.
+    if (!rec.rawCompanyName || rec.rawCompanyName.trim().length < 2) {
+      rejectedNoCompany += 1;
+      await recordError("INVALID_DATA", `Record dibuang: nama perusahaan tidak tersedia — "${rec.rawTitle.slice(0, 60)}"`, { sourceId: source.id });
+      continue;
+    }
     const fp = jobFingerprint(rec.rawCompanyName ?? "", rec.rawTitle, rec.rawLocation);
     const existing = await db.job.findUnique({ where: { fingerprint: fp } });
 
@@ -293,13 +367,11 @@ async function runScrapeForSource(sourceId: string, forced = false): Promise<voi
         where: { jobId: existing.id, sourceId: source.id },
       });
       if (!linkExists) {
-        await db.jobSource.create({
-          data: {
-            jobId: existing.id,
-            sourceId: source.id,
-            sourceJobId: rec.sourceJobId,
-            sourceUrl: rec.sourceUrl,
-          },
+        await insertJobSourceSafe({
+          jobId: existing.id,
+          sourceId: source.id,
+          sourceJobId: rec.sourceJobId,
+          sourceUrl: rec.sourceUrl,
         });
       }
       if (chance(0.55)) {
@@ -316,16 +388,16 @@ async function runScrapeForSource(sourceId: string, forced = false): Promise<voi
 
     const newJob = await db.job.create({
       data: {
+        code: await allocateJobCode(),
         fingerprint: fp,
         title: rec.rawTitle.replace(/\s*[-–]\s*PT\s+.*$/i, "").trim() || rec.rawTitle,
         normalizedTitle: normalizeTitle(rec.rawTitle),
         companyName: rec.rawCompanyName,
         companyLogoUrl: rec.rawCompanyLogoUrl,
-        description: rec.rawDescription
-          ? rec.rawSalaryText
-            ? `${rec.rawDescription}\n\nSalary: ${rec.rawSalaryText}`
-            : rec.rawDescription
-          : "",
+        // Salary text TIDAK di-append ke deskripsi — bikin teks ganda jelek
+        // (gaji udah ada di kolom sendiri). Kosong = honest, detail sheet
+        // nampilin fallback + link sumber.
+        description: rec.rawDescription ?? "",
         salaryMin: null, // set at normalize stage
         salaryMax: null,
         currency: null,
@@ -339,15 +411,32 @@ async function runScrapeForSource(sourceId: string, forced = false): Promise<voi
         companyId: null,
       },
     });
-    // §15.2 — store source identity for provenance
-    await db.jobSource.create({
-      data: {
-        jobId: newJob.id,
-        sourceId: source.id,
-        sourceJobId: rec.sourceJobId,
-        sourceUrl: rec.sourceUrl,
-      },
+    // §15.2 — store source identity for provenance (P2002-safe: run paralel
+    // dari proses lain boleh menyisipkan link yang sama lebih dulu)
+    await insertJobSourceSafe({
+      jobId: newJob.id,
+      sourceId: source.id,
+      sourceJobId: rec.sourceJobId,
+      sourceUrl: rec.sourceUrl,
     });
+    // §12 — boards that publish the recruiter email in the list payload
+    // (Dealls / Sejutacita API author.email) get their contact stored
+    // immediately, so validation can go straight to READY without a
+    // posting-page mailto scan. Mirrors the live-search ingest path.
+    if (rec.publishedEmail) {
+      const v = validateEmail(rec.publishedEmail);
+      if (v.status !== "INVALID") {
+        await db.jobContact.create({
+          data: {
+            jobId: newJob.id,
+            hrEmail: rec.publishedEmail,
+            emailSourceUrl: rec.sourceUrl,
+            emailVerified: v.verified,
+            emailStatus: v.status,
+          },
+        });
+      }
+    }
     created += 1;
   }
 
@@ -395,6 +484,7 @@ async function runScrapeForSource(sourceId: string, forced = false): Promise<voi
 
 
 async function advanceStageBatches(): Promise<void> {
+  const s = state();
   const t = Date.now();
   const st = state();
 
@@ -406,9 +496,10 @@ async function advanceStageBatches(): Promise<void> {
     include: { jobLinks: { include: { source: true } } },
   });
   for (const job of scraped) {
-    // §14 — normalize salary: structured USD/EUR text first, then legacy IDR pattern
+    // §14 — normalize salary: structured USD/EUR text first, lalu range IDR
+    // asli ("IDR 6.000.000 - 9.000.000 per bulan" — Dealls), terakhir angka
+    // tunggal legacy (estimasi ×1.35 HANYA bila range tidak tersedia).
     const usd = parseSalaryUsd(job.description);
-    const salaryMatch = usd ? null : job.description.match(/IDR\s*([\d.,]+\s*(?:jt|juta)?)/i);
     let salaryMin: number | null = null;
     let salaryMax: number | null = null;
     let currency: string | null = null;
@@ -416,13 +507,35 @@ async function advanceStageBatches(): Promise<void> {
       salaryMin = usd.min;
       salaryMax = usd.max;
       currency = usd.currency;
-    } else if (salaryMatch) {
-      const n = parseFloat(salaryMatch[1].replace(/\./g, "").replace(/,/g, "."));
-      const val = /jt|juta/i.test(salaryMatch[1]) ? Math.round(n * 1_000_000) : Math.round(n);
-      if (val > 0) {
-        salaryMin = val;
-        salaryMax = Math.round(val * 1.35);
-        currency = "IDR";
+    } else {
+      const parseIdr = (v: string, unit?: string): number => {
+        const n = parseFloat(v.replace(/\./g, "").replace(/,/g, "."));
+        if (!Number.isFinite(n) || n <= 0) return 0;
+        return unit ? Math.round(n * 1_000_000) : Math.round(n);
+      };
+      // range asli — "IDR 6.000.000 - 9.000.000" / "IDR 8jt - 12jt"
+      const range = job.description.match(/IDR\s*([\d.,]+)\s*(jt|juta)?\s*[-–]\s*(?:IDR\s*)?([\d.,]+)\s*(jt|juta)?/i);
+      if (range) {
+        const lo = parseIdr(range[1], range[2]);
+        const hi = parseIdr(range[3], range[4] ?? range[2]);
+        if (lo > 0 && hi >= lo) {
+          salaryMin = lo;
+          salaryMax = hi;
+          currency = "IDR";
+        }
+      }
+      if (!salaryMin) {
+        // fallback legacy — angka tunggal, max diestimasi
+        const salaryMatch = job.description.match(/IDR\s*([\d.,]+\s*(?:jt|juta)?)/i);
+        if (salaryMatch) {
+          const n = parseFloat(salaryMatch[1].replace(/\./g, "").replace(/,/g, "."));
+          const val = /jt|juta/i.test(salaryMatch[1]) ? Math.round(n * 1_000_000) : Math.round(n);
+          if (val > 0) {
+            salaryMin = val;
+            salaryMax = Math.round(val * 1.35);
+            currency = "IDR";
+          }
+        }
       }
     }
     await db.job.update({
@@ -447,28 +560,57 @@ async function advanceStageBatches(): Promise<void> {
   for (const job of processing) {
     const link = await db.jobSource.findFirst({ where: { jobId: job.id }, include: { source: true } });
     const rec = parseRawFromJob(job, link?.sourceUrl ?? "");
+    // §11 — profil perusahaan ASLI dari API perusahaan Dealls (bukan karangan):
+    // description/website/sector/size ter-publish oleh perusahaan. Slug diambil
+    // dari URL company page Dealls pada link job. Cache in-process per slug.
+    let deallsProfile: Awaited<ReturnType<typeof fetchDeallsCompanyProfile>> = null;
+    // Slug company Dealls: URL company page (…/company/<slug>) ATAU detail job
+    // (…/loker/<jobSlug>~<companySlug>) — keduanya selalu membawa slug asli.
+    const deallsSlug =
+      link?.sourceUrl?.match(/dealls\.com\/company\/([^/~?]+)/)?.[1] ??
+      link?.sourceUrl?.match(/dealls\.com\/loker\/[^/~]+~([^/~?]+)/)?.[1] ??
+      null;
+    if (deallsSlug) {
+      deallsProfile = await fetchDeallsCompanyProfile(decodeURIComponent(deallsSlug));
+      if (deallsProfile) {
+        if (deallsProfile.profile) rec.companyProfile = deallsProfile.profile;
+        if (deallsProfile.website) rec.companyWebsite = deallsProfile.website;
+        if (deallsProfile.sector) rec.companyIndustry = deallsProfile.sector;
+        if (deallsProfile.logoUrl && !rec.companyLogoUrl) rec.companyLogoUrl = deallsProfile.logoUrl;
+      }
+    }
     // company upsert by normalized name (§15.3)
     let company = rec.companyName
       ? await db.company.findUnique({ where: { normalizedName: companyFingerprint(rec.companyName) } })
       : null;
     if (!company && rec.companyName) {
-      // §11 enrichment — logo: provider-resolved PNG link first, raw source logo as backup
-      const resolvedLogo = resolveLogoUrl(rec.companyWebsite) ?? rec.companyLogoUrl ?? "";
+      // §11 enrichment — company BARU: profil ASLI dari API perusahaan Dealls
+      // (bukan karangan): description/website/sector/size ter-publish perusahaan.
+      // Logo: logo resmi sumber DULU (CDN Dealls = logo asli), baru
+      // provider-resolved, badge SVG deterministik sebagai fallback terakhir.
+      const resolvedLogo = rec.companyLogoUrl ?? (await resolveLogoUrl(rec.companyWebsite, rec.companyName)) ?? "";
       company = await db.company.create({
         data: {
           name: rec.companyName,
           normalizedName: companyFingerprint(rec.companyName),
           logoUrl: resolvedLogo,
-          website: rec.companyWebsite,
+          // "" → null: string kosong lolos `?? null` lalu ditolak zod
+          // z.string().url() saat delivery ("Invalid URL") — simpan NULL saja
+          website: rec.companyWebsite || null,
           profile: rec.companyProfile ?? "Profil perusahaan belum tersedia.",
-          industry: null,
+          industry: rec.companyIndustry ?? null,
+          size: deallsProfile?.size ?? null,
         },
       });
-      await log("enrich", "info", `New company registered: ${company.name}${resolvedLogo ? " — logo resolved" : ""}`);
+      await log(
+        "enrich",
+        "info",
+        `New company registered: ${company.name}${deallsProfile?.profile ? " — profil asli dari Dealls" : ""}${resolvedLogo ? " — logo resolved" : ""}`,
+      );
     }
     // §11 enrichment — attempt logo/profile recovery from company website
     if (company) {
-      const resolvedLogo = resolveLogoUrl(company.website ?? rec.companyWebsite);
+      const resolvedLogo = await resolveLogoUrl(company.website ?? rec.companyWebsite, company.name);
       if ((!company.logoUrl || company.logoUrl.endsWith("/assets/logo.png")) && resolvedLogo) {
         await db.company.update({ where: { id: company.id }, data: { logoUrl: resolvedLogo, enrichedAt: new Date() } });
         company = { ...company, logoUrl: resolvedLogo };
@@ -479,6 +621,49 @@ async function advanceStageBatches(): Promise<void> {
       }
       if (!company.profile && rec.companyProfile) {
         await db.company.update({ where: { id: company.id }, data: { profile: rec.companyProfile, enrichedAt: new Date() } });
+      }
+      // §11 profil — scrape homepage: description/industry/size (sekali per company per proses)
+      const needsProfile =
+        company.profile === "Profil perusahaan belum tersedia." ||
+        !company.industry ||
+        !company.size;
+      if (needsProfile && !s.profileEnriched.has(company.id)) {
+        s.profileEnriched.add(company.id);
+        try {
+          const prof = await enrichCompanyProfile(company.name, company.website);
+          if (prof) {
+            await db.company.update({
+              where: { id: company.id },
+              data: {
+                website: company.website || prof.website,
+                profile: prof.description ?? company.profile,
+                industry: prof.industry ?? company.industry,
+                size: prof.size ?? company.size,
+                enrichedAt: new Date(),
+              },
+            });
+            company = { ...company, website: company.website || prof.website, profile: prof.description ?? company.profile, industry: prof.industry ?? company.industry, size: prof.size ?? company.size };
+            await log("enrich", "success", `Profil ${company.name} diperkaya dari ${prof.domain} (${prof.source}${prof.size ? `, size ${prof.size}` : ""})`, { jobId: job.id });
+          }
+        } catch {
+          // situs mati/timeout — ditangani guard profil wajib di bawah
+        }
+        // profil WAJIB — bila situs tidak memberi deskripsi, isi dari fakta
+        // lowongan perusahaan itu sendiri (posisi/lokasi/gaji/platform — bukan karangan)
+        const cur = await db.company.findUnique({ where: { id: company.id }, select: { profile: true } });
+        if (cur && cur.profile === "Profil perusahaan belum tersedia.") {
+          const derived = deriveProfileFromJobs(company.name, {
+            titles: [job.title],
+            locations: [job.location ?? ""],
+            salaryMin: job.salaryMin ?? null,
+            salaryMax: job.salaryMax ?? null,
+            sources: link?.source?.slug ? [link.source.slug] : [],
+            totalJobs: 1,
+          });
+          await db.company.update({ where: { id: company.id }, data: { profile: derived, enrichedAt: new Date() } });
+          company = { ...company, profile: derived };
+          await log("enrich", "info", `Profil ${company.name} diisi dari data lowongan (situs tidak memberi deskripsi)`, { jobId: job.id });
+        }
       }
     }
     await db.job.update({
@@ -588,8 +773,9 @@ async function advanceStageBatches(): Promise<void> {
     const missingLogo = job.company && !job.company.logoUrl;
     if (missingLogo && job.company) {
       // logo recovery — real payload logo lands with the company at enrich time;
-      // for logo-less boards fall back to the job's own payload logo
-      const recovered = resolveLogoUrl(job.company.website) ?? job.companyLogoUrl ?? null;
+      // logo-less boards: resolve via nama→domain→favicon,
+      // badge SVG deterministik sebagai fallback terakhir (logo = field wajib)
+      const recovered = (await resolveLogoUrl(job.company.website, job.company.name)) ?? job.companyLogoUrl ?? null;
       if (recovered) {
         await db.company.update({
           where: { id: job.company.id },
@@ -603,14 +789,40 @@ async function advanceStageBatches(): Promise<void> {
       // §12 real enrichment — scan the actual posting page for a published mailto
       // (one attempt per job per process, rate-limited to respect the boards)
       st.mailtoScanned.add(job.id);
-      const email = await discoverMailto(pageUrl);
+      let email = await discoverMailto(pageUrl);
+      let scannedVia = "http";
+      let emailSourceUrl = pageUrl;
+      if (!email) {
+        // Chain perusahaan (§12 lanjutan): board tidak expose email, tapi
+        // perusahaan mempublish email HR di situs sendiri
+        // (homepage/karir/kontak → Clearbit domain → scan ter-publish;
+        // hit rate terukur 33% vs 0% board). Hanya email yang BENAR-benar
+        // ter-publish — tanpa konstruksi name@domain (§12.4).
+        const chain = await findCompanyHrEmail(job.companyName ?? "", job.company?.website ?? null);
+        if (chain) {
+          email = chain.email;
+          scannedVia = `company-site:${chain.tier}/${chain.via}`;
+          emailSourceUrl = chain.sourceUrl;
+        }
+      }
       if (email) {
         const v = validateEmail(email);
         if (v.status !== "INVALID") {
           await db.jobContact.create({
-            data: { jobId: job.id, hrEmail: email, emailSourceUrl: pageUrl, emailVerified: v.verified, emailStatus: v.status },
+            data: { jobId: job.id, hrEmail: email, emailSourceUrl, emailVerified: v.verified, emailStatus: v.status },
           });
-          await log("enrich", "success", `HR email discovered on posting page: ${email}`, { jobId: job.id });
+          // setiap email yang ditemukan pipeline → masuk gudang email juga
+          const harvestDomain = extractDomain(emailSourceUrl) ?? email.split("@")[1] ?? "";
+          if (harvestDomain.includes(".")) {
+            const { saveHarvestToDb } = await import("./harvest-store");
+            const src = emailSourceUrl ?? `https://${harvestDomain}`;
+            await saveHarvestToDb(
+              [{ email, kind: "role", category: "HR/Rekrutmen", sourceUrl: src, via: "pipeline", sources: [src] }],
+              harvestDomain,
+              job.company?.name ?? job.companyName ?? "",
+            );
+          }
+          await log("enrich", "success", `HR email discovered on posting page (${scannedVia}): ${email}`, { jobId: job.id });
           await db.job.update({ where: { id: job.id }, data: { status: "VALIDATING" } });
           return;
         }
@@ -628,8 +840,8 @@ async function advanceStageBatches(): Promise<void> {
     const missingLogo = job.company && !job.company.logoUrl;
     const missingEmail = !job.contact;
     if (missingLogo && chance(0.4) && job.company) {
-      // logo recovery via provider chain (Google → DuckDuckGo) dari domain website
-      const recovered = resolveLogoUrl(job.company.website);
+      // logo recovery via provider chain (website → nama→domain → badge) dari company
+      const recovered = await resolveLogoUrl(job.company.website, job.company.name);
       if (recovered) {
         await db.company.update({
           where: { id: job.company.id },
@@ -680,6 +892,7 @@ function parseRawFromJob(
   companyLogoUrl: string | null;
   companyWebsite: string | null;
   companyProfile: string | null;
+  companyIndustry: string | null;
   publishedEmail: string | null;
   careerPageUrl: string | null;
 } {
@@ -694,6 +907,7 @@ function parseRawFromJob(
         companyLogoUrl: job.companyLogoUrl ?? null,
         companyWebsite: null,
         companyProfile: null,
+        companyIndustry: null,
         publishedEmail: null,
         careerPageUrl: sourceUrl || null,
       };
@@ -703,6 +917,7 @@ function parseRawFromJob(
       companyLogoUrl: job.companyLogoUrl ?? `${tpl.website}/assets/logo.png`,
       companyWebsite: tpl.website,
       companyProfile: tpl.profile,
+      companyIndustry: null,
       publishedEmail: tpl.noPublicEmail ? null : `${tpl.emailLocal ?? "hr"}@${tpl.website.replace(/^https?:\/\/(www\.)?/, "")}`,
       careerPageUrl: `${tpl.website}/career`,
     };
@@ -717,6 +932,7 @@ function parseRawFromJob(
     companyLogoUrl: tpl ? `${tpl.website}/assets/logo.png` : null,
     companyWebsite: tpl?.website ?? null,
     companyProfile: tpl?.profile ?? null,
+    companyIndustry: null,
     publishedEmail:
       tpl && !tpl.noPublicEmail
         ? `${tpl.emailLocal ?? "hr"}@${tpl.website.replace(/^https?:\/\/(www\.)?/, "")}`
@@ -777,6 +993,149 @@ function getCompanyTemplate(name: string) {
 // Phase 3 — API Delivery (§19–§21: bulk import, tracking, retry)
 // ─────────────────────────────────────────────────────────────
 
+// Pre-flight check (direktif user: "yang boleh dikirim hanya data bersih &
+// lengkap"): payload canonical wajib lolos validasi zod full — sama persis
+// dengan schema §7/§19 yang dipakai portal. Job READY yang payload-nya tidak
+// lolos ditahan (tanpa delivery), BUKAN dikirim lalu gagal+retry — jadi tabel
+// delivery bersih dan portal tidak pernah menerima payload invalid.
+// Tambahan aturan email-mandatory: contact.hr_email wajib ada (gate lama
+// contact: { isNot: null } tetap berlaku).
+export function preflightCanonical(job: {
+  title: string;
+  description: string | null;
+  salaryMin: number | null;
+  salaryMax: number | null;
+  currency: string | null;
+  location: string | null;
+  employmentType: string | null;
+  workplaceType: string | null;
+  requirements: string | null;
+  skills: string | null;
+  scrapedAt: Date;
+  company: { name: string; logoUrl: string | null; website: string | null; profile: string | null } | null;
+  jobLinks: { source: { slug: string }; sourceJobId: string; sourceUrl: string }[];
+  contact: { hrEmail: string; emailSourceUrl: string | null; emailVerified: boolean } | null;
+}): { ok: true; canonical: CanonicalJob } | { ok: false; reason: string } {
+  const missing: string[] = [];
+  if (!job.company) missing.push("company record");
+  if (job.jobLinks.length === 0) missing.push("source link");
+  if (!job.contact) missing.push("HR email (contact)");
+  if (missing.length > 0) return { ok: false, reason: `PREFLIGHT: missing ${missing.join(", ")}` };
+
+  // Mirror canonicalFor(): salary hanya dikirim bila min+max ada
+  const salary =
+    job.salaryMin && job.salaryMax
+      ? { min: job.salaryMin, max: job.salaryMax, currency: job.currency ?? "IDR" }
+      : null;
+
+  let requirements: string[] | null = null;
+  let skills: string[] | null = null;
+  try {
+    requirements = job.requirements ? JSON.parse(job.requirements) : null;
+    skills = job.skills ? JSON.parse(job.skills) : null;
+  } catch {
+    return { ok: false, reason: "PREFLIGHT: requirements/skills bukan JSON valid" };
+  }
+
+  const canonical: CanonicalJob = {
+    source: { platform: job.jobLinks[0].source.slug, job_id: job.jobLinks[0].sourceJobId, url: job.jobLinks[0].sourceUrl },
+    company: {
+      name: job.company!.name,
+      // Konsisten dgn canonicalFor(): data URI tidak lolos validasi URL portal
+      // (422 "company.logo url harus berupa URL yang valid") → konversi.
+      logo_url: portalSafeLogoUrl(job.company!.logoUrl, job.company!.website, job.company!.name),
+      // "" diperlakukan null — konsisten dgn canonicalFor()
+      website: job.company!.website || null,
+      profile: job.company!.profile ?? "",
+    },
+    job: {
+      title: job.title,
+      description: job.description ?? "",
+      salary,
+      location: job.location ?? null,
+      employment_type: job.employmentType ?? null,
+      workplace_type: job.workplaceType ?? null,
+      requirements,
+      skills,
+    },
+    contact: {
+      hr_email: job.contact!.hrEmail,
+      email_source: job.contact!.emailSourceUrl ?? null,
+      email_verified: job.contact!.emailVerified,
+    },
+    metadata: { scraped_at: job.scrapedAt.toISOString() },
+  };
+
+  const parsed = bulkImportSchema.safeParse({ source: canonical.source.platform, scraped_at: canonical.metadata.scraped_at, jobs: [canonical] });
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const path = issue?.path.length ? issue.path.join(".") : "payload";
+    return { ok: false, reason: `PREFLIGHT: zod validation failed at ${path} — ${issue?.message ?? "invalid payload"}` };
+  }
+
+  return { ok: true, canonical };
+}
+
+type PortalPostResult = {
+  ok: boolean;
+  code: number | null; // null = network error (fetch gagal/timeout)
+  body: string;
+  retryable: boolean;
+};
+
+// POST 1 canonical job ke portal tujuan (mis. Karivia). Format: CanonicalJob
+// LANGSUNG tanpa envelope batch §19 — controller Karivia
+// (ScrapedJobIngestionController) menerima satu job per POST dan dedup di
+// sisinya via (source_platform, source_job_id), respons 201=created / 200=updated.
+// Tanpa URL/key terisi → fallback ke simulasi in-process lama supaya pipeline
+// demo tetap jalan tanpa kredensial portal.
+async function postPortalImport(settings: Map<string, string>, canonical: CanonicalJob): Promise<PortalPostResult> {
+  const url = settings.get(SETTING_KEYS.portalApiUrl)?.trim() ?? "";
+  const apiKey = settings.get(SETTING_KEYS.portalApiKey)?.trim() ?? "";
+
+  if (!url || !apiKey) {
+    const payload = { source: canonical.source.platform, scraped_at: canonical.metadata.scraped_at, jobs: [canonical] };
+    const result = await processBulkImport(payload);
+    return {
+      ok: result.success,
+      code: result.success ? 200 : 422,
+      body: JSON.stringify(result),
+      retryable: true,
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(canonical),
+      signal: controller.signal,
+    });
+    const text = (await res.text().catch(() => "")).slice(0, 2000);
+    // 201 = created, 200 = updated (kontrak ScrapedJobIngestionController).
+    // 4xx selain 408/429 (auth/payload salah) tidak ada gunanya di-retry;
+    // 408/429/5xx/network error → retryable sesuai §21.
+    const ok = res.status === 200 || res.status === 201;
+    const retryable = res.status === 408 || res.status === 429 || res.status >= 500;
+    return { ok, code: res.status, body: text, retryable };
+  } catch (err) {
+    return {
+      ok: false,
+      code: null,
+      body: `Network error: ${err instanceof Error ? err.message : "unknown"}`,
+      retryable: true,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function deliverReadyJobs(settings: Map<string, string>): Promise<void> {
   const autoDelivery = settings.get(SETTING_KEYS.autoDelivery) !== "false";
   if (!autoDelivery) return;
@@ -793,9 +1152,11 @@ async function deliverReadyJobs(settings: Map<string, string>): Promise<void> {
     if (d.nextRetryAt && d.nextRetryAt.getTime() > Date.now()) continue;
     await db.apiDelivery.update({ where: { id: d.id }, data: { status: "SENDING" } });
     const canonical = await canonicalFor(d.jobId);
-    // simulate transient API failure (§21 retry strategy)
-    const shouldFail = chance(0.07) && d.attempt < maxAttempts;
-    if (!canonical || shouldFail) {
+    // Hardening produksi: simulasi gagal acak 7% (§21 retry demo) dihapus —
+    // portal tidak pernah menerima error buatan. Delivery hanya gagal kalau
+    // payload canonical-nya beneran tidak bisa disusun (canonicalFor → null);
+    // payload valid selalu lolos pre-flight jadi tidak mungkin 422 di portal.
+    if (!canonical) {
       const failedFinal = d.attempt >= maxAttempts;
       const backoffMs = [5_000, 15_000, 45_000][Math.min(d.attempt - 1, 2)];
       await db.apiDelivery.update({
@@ -803,53 +1164,92 @@ async function deliverReadyJobs(settings: Map<string, string>): Promise<void> {
         data: {
           status: failedFinal ? "FAILED" : "PENDING",
           attempt: failedFinal ? d.attempt : d.attempt + 1,
-          responseCode: shouldFail ? 500 : null,
-          responseBody: shouldFail ? JSON.stringify({ success: false, message: "Internal Server Error" }) : null,
+          responseCode: null,
+          responseBody: failedFinal ? JSON.stringify({ success: false, message: "Canonical payload unavailable — job data incomplete" }) : null,
           nextRetryAt: failedFinal ? null : new Date(Date.now() + backoffMs),
         },
       });
       if (failedFinal) {
-        await recordError("API_ERROR", `Portal import failed after ${maxAttempts} attempts`, { jobId: d.jobId });
-        await log("deliver", "failed", `Delivery ${d.requestId} failed permanently after ${maxAttempts} attempts`, { jobId: d.jobId });
+        await recordError("API_ERROR", `Portal import failed after ${maxAttempts} attempts — canonical payload unavailable`, { jobId: d.jobId });
+        await log("deliver", "failed", `Delivery ${d.requestId} failed permanently after ${maxAttempts} attempts (canonical payload unavailable)`, { jobId: d.jobId });
       } else {
-        await log("deliver", "warning", `Delivery ${d.requestId} attempt ${d.attempt} failed (500) — retry in ${backoffMs / 1000}s`, { jobId: d.jobId });
+        await log("deliver", "warning", `Delivery ${d.requestId} attempt ${d.attempt} failed (canonical payload unavailable) — retry in ${backoffMs / 1000}s`, { jobId: d.jobId });
       }
       continue;
     }
 
-    const payload = { source: canonical.source.platform, scraped_at: canonical.metadata.scraped_at, jobs: [canonical] };
-    const result = await processBulkImport(payload);
+    // Real HTTP POST ke portal (Karivia) — lihat postPortalImport.
+    const result = await postPortalImport(settings, canonical);
+    const failedFinal = !result.ok && (!result.retryable || d.attempt >= maxAttempts);
+    const backoffMs = [5_000, 15_000, 45_000][Math.min(d.attempt - 1, 2)];
     await db.apiDelivery.update({
       where: { id: d.id },
       data: {
-        status: result.success ? "SUCCESS" : "FAILED",
-        responseCode: result.success ? 200 : 422,
-        responseBody: JSON.stringify(result),
-        deliveredAt: result.success ? new Date() : null,
-        nextRetryAt: null,
+        status: result.ok ? "SUCCESS" : failedFinal ? "FAILED" : "PENDING",
+        attempt: result.ok || failedFinal ? d.attempt : d.attempt + 1,
+        responseCode: result.code,
+        responseBody: result.body || null,
+        deliveredAt: result.ok ? new Date() : null,
+        nextRetryAt: result.ok || failedFinal ? null : new Date(Date.now() + backoffMs),
       },
     });
-    if (result.success) {
+    if (result.ok) {
       await db.job.update({ where: { id: d.jobId }, data: { status: "SENT", statusReason: null } });
-      await log("deliver", "success", `Import accepted — ${result.data.created} created, ${result.data.updated} updated`, { jobId: d.jobId });
+      await log("deliver", "success", `Import accepted (HTTP ${result.code}) — ${result.body.slice(0, 200)}`, { jobId: d.jobId });
+    } else if (failedFinal) {
+      await recordError("API_ERROR", `Portal import failed after ${d.attempt} attempts — HTTP ${result.code ?? "network error"}: ${result.body.slice(0, 200)}`, { jobId: d.jobId });
+      await log("deliver", "failed", `Delivery ${d.requestId} failed permanently (HTTP ${result.code ?? "network error"})`, { jobId: d.jobId });
+    } else {
+      await log("deliver", "warning", `Delivery ${d.requestId} attempt ${d.attempt} failed (HTTP ${result.code ?? "network error"}) — retry in ${backoffMs / 1000}s`, { jobId: d.jobId });
     }
   }
 
-  // 2. create new deliveries for READY jobs without one
-  // Email-mandatory rule: the portal only ever receives jobs that carry an HR email
+  // 2. create new deliveries for READY jobs without one — HANYA yang lolos
+  // pre-flight (payload canonical valid penuh, §7/§19). Yang tidak lolos tetap
+  // READY tapi ditahan tanpa delivery + statusReason alasan pre-flight.
+  // §19b (lease/ack): job yang sudah FINAL di-pull consumer (pulledAt) TIDAK
+  // dikirim lagi, dan job yang sedang DI-LEASE (lease aktif) juga ditahan —
+  // bila lease kadaluarsa/tidak di-ack, job balik ke pool & portal delivery
+  // lanjut seperti biasa.
+  const now = new Date();
+  // Syarat preflight (company + jobLinks + contact) disaring langsung di query:
+  // tanpa ini, job rusak (mis. tanpa source link) ditahan preflight tiap tick,
+  // tidak pernah keluar dari READY, dan permanen memblokir batch "paling tua
+  // dulu" (head-of-line blocking) — job sehat di belakangnya tidak pernah
+  // kebagian pengiriman.
   const readyJobs = await db.job.findMany({
     where: {
       status: "READY",
       contact: { isNot: null },
+      company: { isNot: null },
+      jobLinks: { some: {} },
+      pulledAt: null,
+      OR: [{ pullLeaseUntil: null }, { pullLeaseUntil: { lt: now } }],
       deliveries: { none: { status: { in: ["PENDING", "SENDING"] } } },
     },
     take: batchSize,
     orderBy: { scrapedAt: "asc" },
-    include: { deliveries: { orderBy: { createdAt: "desc" }, take: 1 } },
+    include: {
+      company: true,
+      jobLinks: { include: { source: true } },
+      contact: true,
+      deliveries: { orderBy: { createdAt: "desc" }, take: 1 },
+    },
   });
   for (const job of readyJobs) {
     const last = job.deliveries[0];
     if (last && last.status === "FAILED" && last.attempt >= maxAttempts) continue; // needs manual retry
+
+    const pre = preflightCanonical(job);
+    if (!pre.ok) {
+      await db.job.update({
+        where: { id: job.id },
+        data: { statusReason: pre.reason },
+      });
+      await log("deliver", "warning", `${pre.reason} — job ditahan, delivery tidak dibuat`, { jobId: job.id });
+      continue;
+    }
+
     await db.apiDelivery.create({
       data: {
         jobId: job.id,
@@ -867,25 +1267,65 @@ async function deliverReadyJobs(settings: Map<string, string>): Promise<void> {
 // Tick orchestration
 // ─────────────────────────────────────────────────────────────
 
+// Interval schedule → ms (dipakai auto-tick; manual run selalu bisa lewat forced)
+const SCHEDULE_MS: Record<string, number> = {
+  hourly: 3_600_000,
+  every_6_hours: 21_600_000,
+  every_12_hours: 43_200_000,
+  daily: 86_400_000,
+  manual: Number.POSITIVE_INFINITY,
+};
+
 async function tick(): Promise<void> {
   const s = state();
-  if (s.ticking) return;
+  // Watchdog: tick sebelumnya menggantung >5 menit (fetch tanpa timeout,
+  // db hang) → paksa buka kunci supaya pipeline tidak mati permanen.
+  // 5 menit: satu siklus Dealls yang legit (30 detail page × 12s × 2 retry)
+  // bisa 4-5 menit — watchdog 2 menit dulu bikin run duplikat numpuk.
+  if (s.ticking) {
+    if (s.tickStartedAt > 0 && Date.now() - s.tickStartedAt > 300_000) {
+      s.ticking = false;
+      // Run yang tertinggal RUNNING (proses mati/restart mid-scrape) ditandai
+      // FAILED biar riwayat Runs jujur dan baris RUNNING tidak numpuk.
+      const stale = await db.scrapeRun.updateMany({
+        where: { status: "RUNNING", startedAt: { lt: new Date(Date.now() - 600_000) } },
+        data: { finishedAt: new Date(), status: "FAILED", errorCount: 1 },
+      });
+      void log(
+        "scrape",
+        "warning",
+        `Engine watchdog: tick sebelumnya menggantung >5 menit — kunci dilepas${stale.count > 0 ? `, ${stale.count} run abandoned ditandai FAILED` : ""}`
+      );
+    } else {
+      return;
+    }
+  }
   s.ticking = true;
+  s.tickStartedAt = Date.now();
   try {
     const settings = await getSettings();
     s.tickCount += 1;
 
-    // scrape phase
+    // scrape phase — skip bila ada scrape di dalam mutex (manual run / siklus sebelumnya)
     const autoScrape = settings.get(SETTING_KEYS.autoScrape) !== "false";
-    if (autoScrape && s.tickCount % 2 === 1) {
+    if (autoScrape && s.tickCount % 2 === 1 && !s.scrapeBusy) {
       const cap = parseInt(settings.get(SETTING_KEYS.demoJobCap) ?? "800", 10) || 800;
       const total = await db.job.count();
       if (total < cap) {
+        // Hormati schedule per source — hanya source yang due (lastRunAt +
+        // interval schedule terlewat) yang di-scrape, paling overdue dulu.
+        // Manual "Run now" tetap lewat runSourceNow (forced, bypass schedule).
         const sources = await db.source.findMany({ where: { status: "ACTIVE" }, orderBy: { id: "asc" } });
-        if (sources.length > 0) {
-          s.sourceCursor = (s.sourceCursor + 1) % sources.length;
-          await runScrapeForSource(sources[s.sourceCursor].id);
-        }
+        const now = Date.now();
+        const due = sources
+          .map((src) => ({
+            id: src.id,
+            interval: SCHEDULE_MS[src.schedule] ?? 3_600_000,
+            last: src.lastRunAt ? src.lastRunAt.getTime() : 0,
+          }))
+          .filter((x) => now - x.last >= x.interval)
+          .sort((a, b) => a.last - b.last);
+        if (due.length > 0) await runScrapeForSource(due[0].id);
       }
     }
 
@@ -903,6 +1343,7 @@ async function tick(): Promise<void> {
     await recordError("DATABASE_ERROR", `Engine tick error: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     s.ticking = false;
+    s.tickStartedAt = 0;
   }
 }
 
@@ -944,6 +1385,143 @@ export async function runPipelineNow(): Promise<number> {
   const settings = await getSettings();
   await deliverReadyJobs(settings);
   return sources.length;
+}
+
+// Hitung job READY yang siap dikirim ke portal — kriteria identik dgn query
+// di sendReadyJobsToPortal()/deliverReadyJobs(): ber-contact, ber-company,
+// ber-source link, belum di-pull consumer, tidak sedang di-lease, dan belum
+// ada delivery in-flight. FAILED-final tidak dihitung (butuh manual retry).
+// Dipakai kartu "Kirim ke portal" di Portal Settings sbg preview sebelum kirim.
+export async function countReadyJobsForPortal(): Promise<number> {
+  const settings = await getSettings();
+  const maxAttempts = Math.max(1, parseInt(settings.get(SETTING_KEYS.maxAttempts) ?? "3", 10) || 3);
+  const now = new Date();
+  const candidates = await db.job.count({
+    where: {
+      status: "READY",
+      contact: { isNot: null },
+      company: { isNot: null },
+      jobLinks: { some: {} },
+      pulledAt: null,
+      OR: [{ pullLeaseUntil: null }, { pullLeaseUntil: { lt: now } }],
+      deliveries: { none: { status: { in: ["PENDING", "SENDING"] } } },
+    },
+  });
+  if (candidates === 0) return 0;
+  // Kurangi yang gagal pre-flight / FAILED-final — preflightCanonical butuh
+  // relasi lengkap, jadi ambil minimal field yang dipakai preflightCanonical.
+  const rows = await db.job.findMany({
+    where: {
+      status: "READY",
+      contact: { isNot: null },
+      company: { isNot: null },
+      jobLinks: { some: {} },
+      pulledAt: null,
+      OR: [{ pullLeaseUntil: null }, { pullLeaseUntil: { lt: now } }],
+      deliveries: { none: { status: { in: ["PENDING", "SENDING"] } } },
+    },
+    select: {
+      id: true,
+      deliveries: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, attempt: true } },
+    },
+  });
+  let ready = 0;
+  for (const job of rows) {
+    const last = job.deliveries[0];
+    if (last && last.status === "FAILED" && last.attempt >= maxAttempts) continue;
+    ready += 1;
+  }
+  return ready;
+}
+
+// Manual "send now" (§31 dashboard actions) — antrekan SEMUA job READY yang
+// lolos pre-flight, lalu kirim keduanya (delivery in-flight dulu, antrean baru
+// kemudian) dalam satu panggilan. Dipakai tombol "Kirim ke portal" di Portal
+// Settings supaya user tidak nunggu tick otomatis. Return ringkasan utk UI.
+export async function sendReadyJobsToPortal(): Promise<{
+  queued: number;
+  sent: number;
+  failed: number;
+  held: number;
+  errors: string[];
+}> {
+  const settings = await getSettings();
+  const maxAttempts = Math.max(1, parseInt(settings.get(SETTING_KEYS.maxAttempts) ?? "3", 10) || 3);
+  const now = new Date();
+
+  // 1. Antrekan job READY tanpa delivery aktif yang lolos pre-flight
+  //    (query sama persis dgn deliverReadyJobs supaya perilaku konsisten).
+  const readyJobs = await db.job.findMany({
+    where: {
+      status: "READY",
+      contact: { isNot: null },
+      company: { isNot: null },
+      jobLinks: { some: {} },
+      pulledAt: null,
+      OR: [{ pullLeaseUntil: null }, { pullLeaseUntil: { lt: now } }],
+      deliveries: { none: { status: { in: ["PENDING", "SENDING"] } } },
+    },
+    include: {
+      company: true,
+      jobLinks: { include: { source: true } },
+      contact: true,
+      deliveries: { orderBy: { createdAt: "desc" }, take: 1 },
+    },
+  });
+
+  let queued = 0;
+  let held = 0;
+  const errors: string[] = [];
+  for (const job of readyJobs) {
+    const last = job.deliveries[0];
+    if (last && last.status === "FAILED" && last.attempt >= maxAttempts) {
+      held += 1; // butuh manual retry dari tabel delivery
+      continue;
+    }
+    const pre = preflightCanonical(job);
+    if (!pre.ok) {
+      await db.job.update({ where: { id: job.id }, data: { statusReason: pre.reason } });
+      held += 1;
+      errors.push(`${job.title}: ${pre.reason}`);
+      continue;
+    }
+    await db.apiDelivery.create({
+      data: {
+        jobId: job.id,
+        endpoint: DELIVERY_ENDPOINT,
+        requestId: generateRequestId(),
+        attempt: 1,
+        maxAttempts,
+        status: "PENDING",
+      },
+    });
+    queued += 1;
+  }
+
+  // 2. Flush: proses delivery in-flight (termasuk yang baru diantrekan di atas)
+  //    memakai jalur yang sama persis dgn tick otomatis.
+  const before = {
+    success: await db.apiDelivery.count({ where: { status: "SUCCESS" } }),
+    failed: await db.apiDelivery.count({ where: { status: "FAILED" } }),
+  };
+  await deliverReadyJobs(settings);
+  const after = {
+    success: await db.apiDelivery.count({ where: { status: "SUCCESS" } }),
+    failed: await db.apiDelivery.count({ where: { status: "FAILED" } }),
+  };
+
+  const sent = after.success - before.success;
+  const failed = after.failed - before.failed;
+
+  await log(
+    "deliver",
+    sent + failed > 0 ? "info" : "warning",
+    `Manual send to portal: ${queued} antrean baru, ${sent} SUCCESS, ${failed} FAILED, ${held} ditahan pre-flight/FAILED-final`,
+    { source: "manual-send-now", jobId: null }
+  );
+
+  // Errors dibatasi biar response nggak bengkak.
+  return { queued, sent, failed, held, errors: errors.slice(0, 10) };
 }
 
 export async function retryDelivery(deliveryId: string): Promise<void> {

@@ -1,0 +1,47 @@
+# Deploy JobForge — pull image hasil build CI dari GHCR.
+#   docker compose pull app
+#   docker compose up -d
+# Update versi: docker compose pull app && docker compose up -d app
+services:
+  # Database - PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    container_name: jobforge-postgres
+    environment:
+      POSTGRES_USER: jobforge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobforge_password}
+      POSTGRES_DB: jobforge
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - jobforge-network
+    restart: unless-stopped
+
+  # Next.js App (API + Dashboard + engine in-process)
+  app:
+    # Image dari GitHub Actions (push ke main → build otomatis).
+    # GANTI <owner> sesuai repo, mis. ghcr.io/syahrulrzk/jobforge:main
+    image: ghcr.io/syahrulrzk/jobforge:main
+    container_name: jobforge-app
+    environment:
+      DATABASE_URL: postgresql://jobforge:${POSTGRES_PASSWORD:-jobforge_password}@postgres:5432/jobforge
+      # Kredensial login dashboard (override default admin/jobforge-admin):
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-jobforge-admin}
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+    networks:
+      - jobforge-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  jobforge-network:
+    driver: bridge

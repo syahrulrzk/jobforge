@@ -41,78 +41,81 @@ export function RunsView({ live }: { live: boolean }) {
   const [source, setSource] = useState("all");
   const [status, setStatus] = useState("all");
   const [page, setPage] = useState(1);
+  // pageSize tetap 15 per halaman (permintaan user) — tidak dinamis
+  const pageSize = 15;
 
   const url = useMemo(() => {
-    const sp = new URLSearchParams({ page: String(page), pageSize: "20" });
+    const sp = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
     if (source !== "all") sp.set("source", source);
     if (status !== "all") sp.set("status", status);
     return `/api/runs?${sp.toString()}`;
-  }, [source, status, page]);
+  }, [source, status, page, pageSize]);
 
   const { data } = useApi<RunsResponse>(url, { intervalMs: live ? 5000 : null });
   const { data: sourcesData } = useApi<SourcesResponse>("/api/sources");
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.pageSize)) : 1;
 
   return (
-    <div className="space-y-4">
+    <div className="flex h-full min-h-0 flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
         <Select value={source} onValueChange={(v) => { setSource(v); setPage(1); }}>
-          <SelectTrigger className="h-8 w-[160px] border-zinc-800 bg-zinc-900 text-sm"><SelectValue /></SelectTrigger>
-          <SelectContent className="border-zinc-800 bg-zinc-900">
+          <SelectTrigger className="h-8 w-[160px] border-border bg-card text-sm"><SelectValue /></SelectTrigger>
+          <SelectContent className="border-border bg-card">
             <SelectItem value="all">Semua source</SelectItem>
             {sourcesData?.sources.map((s) => <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>)}
           </SelectContent>
         </Select>
         <Select value={status} onValueChange={(v) => { setStatus(v); setPage(1); }}>
-          <SelectTrigger className="h-8 w-[140px] border-zinc-800 bg-zinc-900 text-sm"><SelectValue /></SelectTrigger>
-          <SelectContent className="border-zinc-800 bg-zinc-900">
+          <SelectTrigger className="h-8 w-[140px] border-border bg-card text-sm"><SelectValue /></SelectTrigger>
+          <SelectContent className="border-border bg-card">
             <SelectItem value="all">Semua status</SelectItem>
             <SelectItem value="RUNNING">RUNNING</SelectItem>
             <SelectItem value="SUCCESS">SUCCESS</SelectItem>
             <SelectItem value="FAILED">FAILED</SelectItem>
           </SelectContent>
         </Select>
-        <span className="ml-auto text-xs text-zinc-500 tabular-nums">{data ? `${data.total.toLocaleString("id-ID")} run` : "…"}</span>
+        <span className="ml-auto text-xs text-muted-foreground tabular-nums">{data ? `${data.total.toLocaleString("id-ID")} run` : "…"}</span>
       </div>
 
-      <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/60">
-        <div className="max-h-[62vh] overflow-y-auto">
+      {/* flex-1: kartu mengisi sisa tinggi viewport, pagination nempel di bawah */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card/60">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           <Table>
-            <TableHeader className="sticky top-0 z-10 bg-zinc-900">
-              <TableRow className="border-zinc-800 hover:bg-transparent">
-                <TableHead className="text-zinc-400">Source</TableHead>
-                <TableHead className="text-zinc-400">Engine</TableHead>
-                <TableHead className="text-zinc-400">Status</TableHead>
-                <TableHead className="hidden text-zinc-400 md:table-cell">Mulai</TableHead>
-                <TableHead className="hidden text-zinc-400 md:table-cell">Durasi</TableHead>
-                <TableHead className="hidden text-right text-zinc-400 lg:table-cell">Pages</TableHead>
-                <TableHead className="text-right text-zinc-400">Found</TableHead>
-                <TableHead className="text-right text-emerald-400/80">Created</TableHead>
-                <TableHead className="hidden text-right text-teal-400/70 sm:table-cell">Updated</TableHead>
-                <TableHead className="hidden text-right text-yellow-400/70 sm:table-cell">Dup</TableHead>
-                <TableHead className="hidden text-right text-rose-400/70 sm:table-cell">Rej</TableHead>
-                <TableHead className="hidden text-right text-rose-400/70 md:table-cell">Err</TableHead>
+            <TableHeader className="sticky top-0 z-10 bg-card">
+              <TableRow className="border-border hover:bg-transparent">
+                <TableHead className="text-muted-foreground">Source</TableHead>
+                <TableHead className="text-muted-foreground">Engine</TableHead>
+                <TableHead className="text-muted-foreground">Status</TableHead>
+                <TableHead className="hidden text-muted-foreground md:table-cell">Mulai</TableHead>
+                <TableHead className="hidden text-muted-foreground md:table-cell">Durasi</TableHead>
+                <TableHead className="hidden text-right text-muted-foreground lg:table-cell">Pages</TableHead>
+                <TableHead className="text-right text-muted-foreground">Found</TableHead>
+                <TableHead className="text-right text-emerald-600 dark:text-emerald-400/80">Created</TableHead>
+                <TableHead className="hidden text-right text-teal-600 dark:text-teal-400/70 sm:table-cell">Updated</TableHead>
+                <TableHead className="hidden text-right text-yellow-600 dark:text-yellow-400/70 sm:table-cell">Dup</TableHead>
+                <TableHead className="hidden text-right text-rose-600 dark:text-rose-400/70 sm:table-cell">Rej</TableHead>
+                <TableHead className="hidden text-right text-rose-600 dark:text-rose-400/70 md:table-cell">Err</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {!data ? (
                 Array.from({ length: 8 }).map((_, i) => (
-                  <TableRow key={i} className="border-zinc-800/60">
+                  <TableRow key={i} className="border-border/60">
                     {Array.from({ length: 12 }).map((__, j) => (
-                      <TableCell key={j}><div className="h-4 w-full animate-pulse rounded bg-zinc-800" /></TableCell>
+                      <TableCell key={j}><div className="h-4 w-full animate-pulse rounded bg-accent" /></TableCell>
                     ))}
                   </TableRow>
                 ))
               ) : data.runs.length === 0 ? (
-                <TableRow className="border-zinc-800/60 hover:bg-transparent">
+                <TableRow className="border-border/60 hover:bg-transparent">
                   <TableCell colSpan={12}><EmptyState title="Belum ada scrape run" /></TableCell>
                 </TableRow>
               ) : (
                 data.runs.map((r) => (
-                  <TableRow key={r.id} className="border-zinc-800/60 hover:bg-zinc-800/30">
+                  <TableRow key={r.id} className="border-border/60 hover:bg-accent/30">
                     <TableCell>
-                      <p className="font-medium text-zinc-100">{r.source.name}</p>
-                      <p className="text-[11px] text-zinc-500">{r.source.scraperType.split(",").map((x) => x.trim()).join(" · ")}</p>
+                      <p className="font-medium text-foreground">{r.source.name}</p>
+                      <p className="text-[11px] text-muted-foreground">{r.source.scraperType.split(",").map((x) => x.trim()).join(" · ")}</p>
                     </TableCell>
                     <TableCell>
                       {r.engine && ENGINES[r.engine as EngineKey] ? (
@@ -121,22 +124,22 @@ export function RunsView({ live }: { live: boolean }) {
                           {ENGINES[r.engine as EngineKey].name}
                         </span>
                       ) : (
-                        <span className="text-[11px] text-zinc-600">—</span>
+                        <span className="text-[11px] text-muted-foreground/80">—</span>
                       )}
                     </TableCell>
                     <TableCell><StatusBadge status={r.status} /></TableCell>
-                    <TableCell className="hidden text-sm text-zinc-400 md:table-cell">{timeAgo(r.startedAt)}</TableCell>
-                    <TableCell className="hidden text-sm tabular-nums text-zinc-400 md:table-cell">
-                      {r.status === "RUNNING" ? <span className="animate-pulse text-amber-300">berjalan…</span> : duration(r.durationMs)}
+                    <TableCell className="hidden text-sm text-muted-foreground md:table-cell">{timeAgo(r.startedAt)}</TableCell>
+                    <TableCell className="hidden text-sm tabular-nums text-muted-foreground md:table-cell">
+                      {r.status === "RUNNING" ? <span className="animate-pulse text-amber-700 dark:text-amber-300">berjalan…</span> : duration(r.durationMs)}
                     </TableCell>
-                    <TableCell className="hidden text-right tabular-nums text-zinc-400 lg:table-cell">{r.pagesScraped}</TableCell>
-                    <TableCell className="text-right font-semibold tabular-nums text-zinc-200">{r.jobsFound}</TableCell>
-                    <TableCell className="text-right tabular-nums text-emerald-300">{r.jobsCreated}</TableCell>
-                    <TableCell className="hidden text-right tabular-nums text-teal-300/80 sm:table-cell">{r.jobsUpdated}</TableCell>
-                    <TableCell className="hidden text-right tabular-nums text-yellow-300/80 sm:table-cell">{r.jobsDuplicate}</TableCell>
-                    <TableCell className="hidden text-right tabular-nums text-rose-300/80 sm:table-cell">{r.jobsRejected}</TableCell>
+                    <TableCell className="hidden text-right tabular-nums text-muted-foreground lg:table-cell">{r.pagesScraped}</TableCell>
+                    <TableCell className="text-right font-semibold tabular-nums text-foreground">{r.jobsFound}</TableCell>
+                    <TableCell className="text-right tabular-nums text-emerald-700 dark:text-emerald-300">{r.jobsCreated}</TableCell>
+                    <TableCell className="hidden text-right tabular-nums text-teal-700 dark:text-teal-300/80 sm:table-cell">{r.jobsUpdated}</TableCell>
+                    <TableCell className="hidden text-right tabular-nums text-yellow-700 dark:text-yellow-300/80 sm:table-cell">{r.jobsDuplicate}</TableCell>
+                    <TableCell className="hidden text-right tabular-nums text-rose-700 dark:text-rose-300/80 sm:table-cell">{r.jobsRejected}</TableCell>
                     <TableCell className="hidden text-right tabular-nums md:table-cell">
-                      <span className={r.errorCount > 0 ? "text-rose-400" : "text-zinc-600"}>{r.errorCount}</span>
+                      <span className={r.errorCount > 0 ? "text-rose-600 dark:text-rose-400" : "text-muted-foreground/80"}>{r.errorCount}</span>
                     </TableCell>
                   </TableRow>
                 ))
@@ -147,12 +150,12 @@ export function RunsView({ live }: { live: boolean }) {
       </div>
 
       <div className="flex items-center justify-between">
-        <p className="text-xs text-zinc-500">Halaman {data?.page ?? 1} dari {totalPages}</p>
+        <p className="text-xs text-muted-foreground tabular-nums">{data?.total.toLocaleString("id-ID") ?? 0} run · Halaman {data?.page ?? 1} dari {totalPages}</p>
         <div className="flex gap-1.5">
-          <Button variant="outline" size="sm" className="h-7 border-zinc-800 bg-zinc-900" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
+          <Button variant="outline" size="sm" className="h-7 border-border bg-card" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
             <ChevronLeft className="h-3.5 w-3.5" /> Prev
           </Button>
-          <Button variant="outline" size="sm" className="h-7 border-zinc-800 bg-zinc-900" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
+          <Button variant="outline" size="sm" className="h-7 border-border bg-card" disabled={page >= totalPages} onClick={() => setPage((p) => p + 1)}>
             Next <ChevronRight className="h-3.5 w-3.5" />
           </Button>
         </div>

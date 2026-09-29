@@ -13,8 +13,8 @@
 //     immediately visible in the search results grid
 //   - known postings are only linked to the board again (dedup §15.1)
 //
-// Sources without a real integration (JobStreet dkk. — anti-bot)
-// are reported honestly as failed — never mocked (anti-spam §9.3).
+// Sources without a real integration are reported honestly as
+// failed — never mocked (anti-spam §9.3).
 // Every run is logged to the Activity Console with the engine that
 // executed it.
 // ─────────────────────────────────────────────────────────────
@@ -26,15 +26,17 @@ import { ENGINES, parseEngineList, parseEnginePool, type EngineKey } from "./eng
 import { discoverMailto, extractPublishedEmail, log } from "./engine";
 import { SETTING_KEYS } from "./types";
 import { BROWSER_UA, sourceFetchText, type SourceNetConfig } from "./net";
+import { allocateJobCode } from "./job-code";
+import { resolveDomainFromName } from "./logo";
 import {
   mapRemotiveJob,
   mapJobicyJob,
   mapArbeitnowJob,
   mapRemoteOkJob,
   mapHimalayasJob,
-  mapJobStreetJob,
-  jobStreetSearchUrl,
-  extractJobPostingsFromHtml,
+  mapDeallsJob,
+  enrichDeallsDescriptions,
+  SEJUTACITA_LIST_URL,
   realBoardError,
 } from "./sources-real";
 
@@ -73,57 +75,6 @@ interface BoardSearch {
   search: (words: string[], rawQuery: string, ctx: LiveBoardCtx) => Promise<RawJobRecord[]>;
 }
 
-// ── JobStreet browser path (engine: playwright) ─────────────────
-// Real Chromium via Playwright — the only honest way through the
-// Cloudflare Turnstile interstitial when the exit IP (direct or via
-// the source's residential proxy) gets challenged. If the challenge
-// does not settle headless, fail over honestly — no fake data.
-async function searchJobStreetBrowser(url: string, ctx: LiveBoardCtx): Promise<RawJobRecord[]> {
-  let chromium: typeof import("playwright").chromium;
-  try {
-    ({ chromium } = await import("playwright"));
-  } catch (err) {
-    throw new Error(`Playwright tidak bisa dimuat di host ini: ${err instanceof Error ? err.message.slice(0, 90) : "unknown"}`);
-  }
-  const proxy = (ctx.proxyUrl ?? "").trim();
-  const browser = await chromium.launch({
-    headless: true,
-    ...(proxy ? { proxy: { server: proxy } } : {}),
-    args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage", "--window-size=1366,850", "--lang=id-ID"],
-  });
-  try {
-    const context = await browser.newContext({
-      userAgent: BROWSER_UA,
-      viewport: { width: 1366, height: 850 },
-      locale: "id-ID",
-      timezoneId: "Asia/Jakarta",
-      extraHTTPHeaders: { "Accept-Language": "id-ID,id;q=0.9,en;q=0.8" },
-    });
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-      Object.defineProperty(navigator, "languages", { get: () => ["id-ID", "id", "en"] });
-      Object.defineProperty(navigator, "plugins", { get: () => [1, 2, 3, 4, 5] });
-      (window as unknown as Record<string, unknown>).chrome = { runtime: {} };
-    });
-    const page = await context.newPage();
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45_000 });
-    const CHAL = /just a moment|tunggu sebentar|attention required/i;
-    for (let i = 0; i < 4; i++) {
-      if (!CHAL.test(await page.title())) break;
-      await page.waitForTimeout(3_000); // beri waktu challenge JS auto-solve di IP yang dipercaya
-    }
-    if (CHAL.test(await page.title())) {
-      throw new Error("Cloudflare challenge tidak selesai di IP ini — set proxy residensial di setting source");
-    }
-    const html = await page.content();
-    const postings = extractJobPostingsFromHtml(html);
-    if (postings.length === 0) throw new Error("halaman terbuka via browser tapi tidak ada JSON-LD JobPosting");
-    return postings.map(mapJobStreetJob).filter((r): r is RawJobRecord => r !== null);
-  } finally {
-    await browser.close().catch(() => undefined);
-  }
-}
-
 /** Real HTTP probe dengan profil engine + network config source (proxy/headers) — dipakai untuk source yang belum punya
  *  parser integrasi. Tiap engine di chain mencoba menjangkau site secara nyata
  *  (browser engine pakai UA browser, HTTP engine pakai UA bot), jadi laporan
@@ -156,8 +107,8 @@ async function probeWithEngine(
 }
 
 // Real keyword-search integrations per board slug. A source found in
-// this map can be scraped live; anything else (JobStreet, Glints…)
-// has no real integration yet and is reported as such — no mock data.
+// this map can be scraped live; anything else has no real integration
+// yet and is reported as such — no mock data.
 // Boards with native keyword search use it (remotive `search`, jobicy
 // `tag`, remoteok single-word `tag`); the rest pull a larger batch and
 // filter locally.
@@ -212,29 +163,36 @@ const BOARD_SEARCHES: BoardSearch[] = [
     },
   },
   {
-    slug: "jobstreet",
-    name: "JobStreet",
-    // SEO listing page (id.jobstreet.com/id/{query}-jobs) with schema.org
-    // JSON-LD JobPosting blocks. HTTP engines fetch it directly — works
-    // when the source has a residential proxy; 403 → failover. The
-    // Playwright attempt launches a REAL Chromium (proxy-aware) and can
-    // complete the Cloudflare challenge on a trusted exit IP.
+    slug: "dealls",
+    name: "Dealls",
+    // Dealls (Sejutacita API) punya native keyword search: param `search=`
+    // (verified: search=frontend → 2, admin → 37). Multi-kata = AND ketat,
+    // jadi query panjang difilter lokal ALL-words agar angka report konsisten
+    // dengan grid /api/jobs. Email HR langsung ada di payload list — ingest
+    // tanpa perlu scan mailto.
     search: async (words, rawQuery, ctx) => {
-      const url = jobStreetSearchUrl(rawQuery);
-      if (ctx.engine === "playwright") {
-        return searchJobStreetBrowser(url, ctx);
+      // API menolak limit > 55 (measured: HTTP 400 "limit must be <= 55")
+      const data = (await getJson(`${SEJUTACITA_LIST_URL}&limit=55&search=${encodeURIComponent(rawQuery)}`, ctx)) as {
+        data?: { docs?: Record<string, unknown>[] };
+      };
+      const docs = data.data?.docs ?? [];
+      // API search multi-kata AND ketat ("frontend developer" → 0) — kalau
+      // hasil 0 dan query multi-kata, coba kata pertama lalu filter lokal.
+      let list = docs;
+      if (list.length === 0 && words.length > 1) {
+        const fallback = (await getJson(`${SEJUTACITA_LIST_URL}&limit=55&search=${encodeURIComponent(words[0])}`, ctx)) as {
+          data?: { docs?: Record<string, unknown>[] };
+        };
+        list = fallback.data?.docs ?? [];
       }
-      if (ENGINES[ctx.engine].kind === "browser") {
-        // puppeteer / selenium — no driver on this host; honest fast-fail, no theater
-        throw new Error(`driver ${ENGINES[ctx.engine].name} tidak tersedia di host ini — pakai Playwright atau HTTP engine + proxy`);
-      }
-      const { ok, status, text } = await sourceFetchText(url, ctx, { ua: "browser", timeoutMs: 12_000 });
-      if (!ok) {
-        throw new Error(`HTTP ${status}${status === 403 ? " — Cloudflare challenge (set proxy residensial / pakai engine Playwright)" : ""}`);
-      }
-      const postings = extractJobPostingsFromHtml(text);
-      if (postings.length === 0) throw new Error("halaman terbuka tapi tidak ada JSON-LD JobPosting (kemungkinan masih di challenge)");
-      return postings.map(mapJobStreetJob).filter((r): r is RawJobRecord => r !== null && matchesKeyword(r, words));
+      // Description enrichment — record tanpa description bakal di-REJECT
+      // pipeline (mandatory critical), jadi fetch detail page buat hasil
+      // yang lolos filter (cap 20 biar muat di budget search).
+      const filtered = list
+        .map((j) => mapDeallsJob(j as never))
+        .filter((r): r is RawJobRecord => r !== null && matchesKeyword(r, words));
+      const { records } = await enrichDeallsDescriptions(filtered, ctx, 20);
+      return records;
     },
   },
 ];
@@ -292,8 +250,12 @@ export interface LiveSearchResult {
 async function ingestRecord(
   rec: RawJobRecord,
   sourceId: string
-): Promise<"created" | "duplicate" | "needs_enrichment" | "enriched"> {
-  const fp = jobFingerprint(rec.rawCompanyName ?? "", rec.rawTitle, rec.rawLocation);
+): Promise<"created" | "duplicate" | "needs_enrichment" | "enriched" | "rejected"> {
+  // DIREKTIF USER: record TANPA nama perusahaan TIDAK BOLEH masuk DB.
+  if (!rec.rawCompanyName || rec.rawCompanyName.trim().length < 2) {
+    return "rejected";
+  }
+  const fp = jobFingerprint(rec.rawCompanyName, rec.rawTitle, rec.rawLocation);
   const existing = await db.job.findUnique({ where: { fingerprint: fp } });
 
   if (existing) {
@@ -334,6 +296,7 @@ async function ingestRecord(
 
   const newJob = await db.job.create({
     data: {
+      code: await allocateJobCode(),
       fingerprint: fp,
       title: rec.rawTitle.replace(/\s*[-–]\s*PT\s+.*$/i, "").trim() || rec.rawTitle,
       normalizedTitle: normalizeTitle(rec.rawTitle),
@@ -381,10 +344,51 @@ async function ingestRecord(
   return emailOk ? "created" : "needs_enrichment";
 }
 
-export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string[]): Promise<LiveSearchResult> {
+export async function liveKeywordScrape(
+  rawQuery: string,
+  selectedSlugs?: string[],
+  companyFilter?: string
+): Promise<LiveSearchResult> {
   const q = rawQuery.trim().slice(0, 120);
   const words = q.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 6);
   const t0 = Date.now();
+
+  // Company filter (direktif user): "simgroup.co.id" → resolve nama via
+  // Clearbit → jadi KEYWORD scrape (board dicari pakai nama perusahaan,
+  // bukan cuma filter pasif) + filter hasil.
+  let companyTokens: string[] = [];
+  let companyDomain: string | null = null;
+  if (companyFilter && companyFilter.trim()) {
+    const cf = companyFilter.trim();
+    if (cf.includes(".")) {
+      companyDomain = cf.replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "");
+      const base = companyDomain.split(".")[0];
+      const resolved = await resolveDomainFromName(base);
+      companyTokens = resolved
+        ? resolved.split(".")[0].split(/[-\s]/).filter((t) => t.length >= 2)
+        : [];
+      if (companyTokens.length === 0) companyTokens = [base]; // fallback: potongan domain
+    } else {
+      companyTokens = cf.split(/\s+/).filter((t) => t.length >= 2);
+    }
+  }
+  // Match perusahaan: token harus muncul di NAMA perusahaan ATAU JUDUL lowongan
+  // (banyak posting via agen punya brand di judul, mis. "SALES BANK MANDIRI"
+  // dengan companyName = agen outsourcingnya). Bandingkan juga versi tanpa
+  // pemisah supaya "simgroup" match "SIM Group".
+  const recordMatchesCompany = (companyName: string | null | undefined, title: string): boolean => {
+    if (companyTokens.length === 0) return true;
+    const hay = `${companyName ?? ""} ${title}`.toLowerCase();
+    const hayNs = hay.replace(/[^a-z0-9]/g, "");
+    return companyTokens.every((t) => {
+      const tn = t.toLowerCase().replace(/[^a-z0-9]/g, "");
+      return hay.includes(t.toLowerCase()) || hayNs.includes(tn);
+    });
+  };
+  // Keyword yang dikirim ke board: kalau ada filter perusahaan, NAMA
+  // PERUSAHAAN jadi keyword pencarian (intent user: "cari loker di X").
+  const searchWords = companyTokens.length > 0 ? companyTokens : words;
+  const searchRaw = companyTokens.length > 0 ? companyTokens.join(" ") : q;
 
   // Board list dari Data Sources (DB) — bukan hardcode:
   //   - user memilih board tertentu (slug list) → scrape source itu apa pun
@@ -413,7 +417,7 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
 
       const boardSearch = BOARD_SEARCHES.find((b) => b.slug === source.slug);
       if (!boardSearch) {
-        // ── Source tanpa parser integrasi (JobStreet dkk.) — chain tetap
+        // ── Source tanpa parser integrasi — chain tetap
         // dijalankan PENUH: tiap engine di setting source mencoba menjangkau
         // site secara nyata (HTTP probe per engine). Hasilnya jujur:
         // berapa engine dicoba, mana yang kena blok anti-bot, status HTTP-nya.
@@ -480,7 +484,7 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
         const engine = chain[i];
         const at0 = Date.now();
         try {
-          records = await boardSearch.search(words, q, { engine, proxyUrl: source.proxyUrl, headersJson: source.headersJson });
+          records = await boardSearch.search(searchWords, searchRaw, { engine, proxyUrl: source.proxyUrl, headersJson: source.headersJson });
           winningEngine = engine;
           lastError = null;
           attempts.push({ engine, status: "success", durationMs: Date.now() - at0, note: `found ${records.length}` });
@@ -530,14 +534,21 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
       // records) runs concurrently so a fresh keyword cannot exceed the 60s budget
       const list = records.slice(0, MAX_PER_BOARD);
       let cursor = 0;
+      let rejected = 0;
       await Promise.all(
         Array.from({ length: Math.min(6, Math.max(1, list.length)) }, async () => {
           while (cursor < list.length) {
             const rec = list[cursor++];
+            // company filter: record dari perusahaan lain dibuang sebelum masuk DB
+            if (!recordMatchesCompany(rec.rawCompanyName, rec.rawTitle)) {
+              rejected += 1;
+              continue;
+            }
             const res = await ingestRecord(rec, source.id);
             if (res === "created") created += 1;
             else if (res === "duplicate") duplicate += 1;
             else if (res === "enriched") enriched += 1;
+            else if (res === "rejected") rejected += 1;
             else needsEnrichment += 1;
           }
         })
@@ -546,7 +557,7 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
       await log(
         "scrape",
         "success",
-        `Live search "${q}" via ${ENGINES[winningEngine].name} engine on ${source.name} — found ${records.length}, created ${created}, duplicate ${duplicate}, needs-enrichment ${needsEnrichment}, enriched ${enriched}`,
+        `Live search "${q}" via ${ENGINES[winningEngine].name} engine on ${source.name} — found ${records.length}, created ${created}, duplicate ${duplicate}, needs-enrichment ${needsEnrichment}, enriched ${enriched}, rejected-no-company ${rejected}`,
         { source: source.slug, durationMs }
       );
       return {
@@ -561,7 +572,7 @@ export async function liveKeywordScrape(rawQuery: string, selectedSlugs?: string
         duplicate,
         needsEnrichment,
         enriched,
-        skipped: 0,
+        skipped: rejected,
         durationMs,
       };
     })

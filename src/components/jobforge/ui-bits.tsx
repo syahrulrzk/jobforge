@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { ShieldAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { extractDomain } from "@/lib/jobforge/logo";
 
@@ -10,37 +11,37 @@ import { extractDomain } from "@/lib/jobforge/logo";
 
 export const STATUS_STYLES: Record<string, string> = {
   // job lifecycle (§16)
-  SCRAPED: "bg-zinc-500/10 text-zinc-300 border-zinc-500/30",
-  PROCESSING: "bg-amber-500/10 text-amber-300 border-amber-500/30",
+  SCRAPED: "bg-zinc-500/10 text-foreground/90 border-zinc-500/30",
+  PROCESSING: "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30",
   ENRICHING: "bg-fuchsia-500/10 text-fuchsia-300 border-fuchsia-500/30",
-  VALIDATING: "bg-violet-500/10 text-violet-300 border-violet-500/30",
-  READY: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
-  SENT: "bg-teal-500/10 text-teal-300 border-teal-500/30",
-  PUBLISHED: "bg-emerald-500/20 text-emerald-200 border-emerald-400/40 font-semibold",
-  FAILED: "bg-rose-500/10 text-rose-300 border-rose-500/30",
-  REJECTED: "bg-rose-500/10 text-rose-300 border-rose-500/30",
-  NEEDS_ENRICHMENT: "bg-yellow-500/10 text-yellow-300 border-yellow-500/30",
+  VALIDATING: "bg-violet-500/10 text-violet-700 dark:text-violet-300 border-violet-500/30",
+  READY: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
+  SENT: "bg-teal-500/10 text-teal-700 dark:text-teal-300 border-teal-500/30",
+  PUBLISHED: "bg-emerald-500/20 text-emerald-800 dark:text-emerald-200 border-emerald-400/40 font-semibold",
+  FAILED: "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30",
+  REJECTED: "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30",
+  NEEDS_ENRICHMENT: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-300 border-yellow-500/30",
   // source status (§8)
-  ACTIVE: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
-  INACTIVE: "bg-zinc-500/10 text-zinc-400 border-zinc-500/30",
-  ERROR: "bg-rose-500/10 text-rose-300 border-rose-500/30",
+  ACTIVE: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
+  INACTIVE: "bg-zinc-500/10 text-muted-foreground border-zinc-500/30",
+  ERROR: "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30",
   // delivery status (§20)
-  PENDING: "bg-zinc-500/10 text-zinc-300 border-zinc-500/30",
-  SENDING: "bg-amber-500/10 text-amber-300 border-amber-500/30",
-  SUCCESS: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+  PENDING: "bg-zinc-500/10 text-foreground/90 border-zinc-500/30",
+  SENDING: "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30",
+  SUCCESS: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
   // email status (§13)
-  VALID: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
-  INVALID: "bg-rose-500/10 text-rose-300 border-rose-500/30",
-  UNKNOWN: "bg-zinc-500/10 text-zinc-400 border-zinc-500/30",
+  VALID: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
+  INVALID: "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30",
+  UNKNOWN: "bg-zinc-500/10 text-muted-foreground border-zinc-500/30",
   // run status (§24)
-  RUNNING: "bg-amber-500/10 text-amber-300 border-amber-500/30",
+  RUNNING: "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30",
   // error status (§25)
-  OPEN: "bg-rose-500/10 text-rose-300 border-rose-500/30",
-  RESOLVED: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+  OPEN: "bg-rose-500/10 text-rose-700 dark:text-rose-300 border-rose-500/30",
+  RESOLVED: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
 };
 
 export function StatusBadge({ status, className }: { status: string; className?: string }) {
-  const style = STATUS_STYLES[status] ?? "bg-zinc-500/10 text-zinc-300 border-zinc-500/30";
+  const style = STATUS_STYLES[status] ?? "bg-zinc-500/10 text-foreground/90 border-zinc-500/30";
   const dot =
     status === "ACTIVE" || status === "SUCCESS" || status === "PUBLISHED" || status === "READY"
       ? "bg-emerald-400"
@@ -59,6 +60,27 @@ export function StatusBadge({ status, className }: { status: string; className?:
     >
       {dot && <span className={cn("h-1.5 w-1.5 rounded-full", dot)} />}
       {status.replace(/_/g, " ")}
+    </span>
+  );
+}
+
+// Badge penahanan pre-flight delivery (direktif user: hanya payload bersih &
+// lengkap yang boleh dikirim). statusReason "PREFLIGHT: ..." berarti job
+// ber-status READY tapi delivery-nya ditahan karena payload canonical gagal
+// validasi zod (schema portal §7/§19). Alasan lengkap muncul di tooltip.
+export function isPreflightHeld(statusReason: string | null | undefined): boolean {
+  return !!statusReason && statusReason.startsWith("PREFLIGHT:");
+}
+
+export function PreflightBadge({ statusReason }: { statusReason: string }) {
+  const short = statusReason.length > 80 ? `${statusReason.slice(0, 80)}…` : statusReason;
+  return (
+    <span
+      title={statusReason}
+      className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium tracking-wide whitespace-nowrap text-amber-700 dark:text-amber-300"
+    >
+      <ShieldAlert className="h-3 w-3" />
+      {short}
     </span>
   );
 }
@@ -88,13 +110,19 @@ export function CompanyAvatar({
   const domain = extractDomain(website);
   if (domain) candidates.push(`/api/logo/${domain}`);
 
+  // reset ke kandidat pertama saat sumber logo berubah — pattern "adjust state
+  // during render" (react.dev), tanpa effect
   const [idx, setIdx] = useState(0);
-  useEffect(() => setIdx(0), [logoUrl, website]);
+  const [prevKey, setPrevKey] = useState<string | null>(null);
+  const logoKey = `${logoUrl ?? ""}|${website ?? ""}`;
+  if (prevKey !== logoKey) {
+    setPrevKey(logoKey);
+    setIdx(0);
+  }
 
-  const cls = "rounded-md border border-zinc-700/60 bg-zinc-800 object-contain";
+  const cls = "rounded-md border border-border/60 bg-accent object-contain";
   if (idx < candidates.length) {
     return (
-      // eslint-disable-next-line @next/next/no-img-element
       <img
         src={candidates[idx]}
         alt={`Logo ${name}`}
@@ -186,20 +214,20 @@ export function StatCard({
   accent?: "amber" | "emerald" | "rose" | "zinc" | "teal" | "violet";
 }) {
   const accents: Record<string, string> = {
-    amber: "text-amber-400 bg-amber-500/10 border-amber-500/20",
-    emerald: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
-    rose: "text-rose-400 bg-rose-500/10 border-rose-500/20",
-    teal: "text-teal-400 bg-teal-500/10 border-teal-500/20",
-    violet: "text-violet-400 bg-violet-500/10 border-violet-500/20",
-    zinc: "text-zinc-400 bg-zinc-500/10 border-zinc-500/20",
+    amber: "text-amber-600 dark:text-amber-400 bg-amber-500/10 border-amber-500/20",
+    emerald: "text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+    rose: "text-rose-600 dark:text-rose-400 bg-rose-500/10 border-rose-500/20",
+    teal: "text-teal-600 dark:text-teal-400 bg-teal-500/10 border-teal-500/20",
+    violet: "text-violet-600 dark:text-violet-400 bg-violet-500/10 border-violet-500/20",
+    zinc: "text-muted-foreground bg-zinc-500/10 border-zinc-500/20",
   };
   return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 transition-colors hover:border-zinc-700">
+    <div className="rounded-xl border border-border bg-card/60 p-4 transition-colors hover:border-border">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="truncate text-xs font-medium tracking-wide text-zinc-400 uppercase">{label}</p>
-          <p className="mt-1.5 text-2xl font-bold tracking-tight text-zinc-100 tabular-nums">{value}</p>
-          {sub && <p className="mt-0.5 truncate text-xs text-zinc-500">{sub}</p>}
+          <p className="truncate text-xs font-medium tracking-wide text-muted-foreground uppercase">{label}</p>
+          <p className="mt-1.5 text-2xl font-bold tracking-tight text-foreground tabular-nums">{value}</p>
+          {sub && <p className="mt-0.5 truncate text-xs text-muted-foreground">{sub}</p>}
         </div>
         {icon && (
           <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border", accents[accent])}>
@@ -213,24 +241,24 @@ export function StatCard({
 
 export function EmptyState({ title, hint }: { title: string; hint?: string }) {
   return (
-    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 py-14 text-center">
-      <p className="text-sm font-medium text-zinc-400">{title}</p>
-      {hint && <p className="mt-1 max-w-sm text-xs text-zinc-600">{hint}</p>}
+    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border bg-card/30 py-14 text-center">
+      <p className="text-sm font-medium text-muted-foreground">{title}</p>
+      {hint && <p className="mt-1 max-w-sm text-xs text-muted-foreground/80">{hint}</p>}
     </div>
   );
 }
 
 export function LogActionColor({ action }: { action: string }) {
   const map: Record<string, string> = {
-    scrape: "text-amber-400",
-    parse: "text-zinc-300",
-    normalize: "text-zinc-300",
+    scrape: "text-amber-600 dark:text-amber-400",
+    parse: "text-foreground/90",
+    normalize: "text-foreground/90",
     enrich: "text-fuchsia-400",
-    validate: "text-violet-400",
-    dedup: "text-yellow-400",
-    deliver: "text-teal-400",
-    import: "text-emerald-400",
-    error: "text-rose-400",
+    validate: "text-violet-600 dark:text-violet-400",
+    dedup: "text-yellow-600 dark:text-yellow-400",
+    deliver: "text-teal-600 dark:text-teal-400",
+    import: "text-emerald-600 dark:text-emerald-400",
+    error: "text-rose-600 dark:text-rose-400",
   };
-  return <span className={cn("font-semibold lowercase", map[action] ?? "text-zinc-300")}>{action}</span>;
+  return <span className={cn("font-semibold lowercase", map[action] ?? "text-foreground/90")}>{action}</span>;
 }

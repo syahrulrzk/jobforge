@@ -38,10 +38,10 @@ const STATUS_DOT: Record<string, string> = {
 };
 
 const STATUS_TEXT: Record<string, string> = {
-  failed: "text-rose-300",
-  warning: "text-yellow-300",
-  info: "text-zinc-400",
-  success: "text-zinc-300",
+  failed: "text-rose-700 dark:text-rose-300",
+  warning: "text-yellow-700 dark:text-yellow-300",
+  info: "text-muted-foreground",
+  success: "text-foreground/90",
 };
 
 function stamp(ts: string): string {
@@ -140,8 +140,8 @@ export function ActivityView({ live }: { live: boolean }) {
             className={cn(
               "rounded-lg border px-2.5 py-1.5 text-xs transition-colors",
               action === "all"
-                ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
-                : "border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-700"
+                ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                : "border-border bg-card/60 text-muted-foreground hover:border-border"
             )}
           >
             Semua
@@ -153,11 +153,11 @@ export function ActivityView({ live }: { live: boolean }) {
               className={cn(
                 "rounded-lg border px-2.5 py-1.5 font-mono text-[11px] lowercase transition-colors",
                 action === a.action
-                  ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
-                  : "border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:border-zinc-700"
+                  ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                  : "border-border bg-card/60 text-muted-foreground hover:border-border"
               )}
             >
-              {a.action} <span className="rounded bg-zinc-800 px-1 tabular-nums">{a.count}</span>
+              {a.action} <span className="rounded bg-accent px-1 tabular-nums">{a.count}</span>
             </button>
           ))}
         </div>
@@ -166,7 +166,7 @@ export function ActivityView({ live }: { live: boolean }) {
           <select
             value={status}
             onChange={(e) => resetAnd(() => setStatus(e.target.value))}
-            className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-300 [&>option]:bg-zinc-900"
+            className="rounded-md border border-border bg-card px-2 py-1.5 text-xs text-foreground/90 [&>option]:bg-card"
           >
             <option value="all">Semua status</option>
             <option value="success">success</option>
@@ -177,7 +177,7 @@ export function ActivityView({ live }: { live: boolean }) {
           <select
             value={source}
             onChange={(e) => resetAnd(() => setSource(e.target.value))}
-            className="max-w-[160px] rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-300 [&>option]:bg-zinc-900"
+            className="max-w-[160px] rounded-md border border-border bg-card px-2 py-1.5 text-xs text-foreground/90 [&>option]:bg-card"
           >
             <option value="all">Semua source</option>
             <option value="system">system</option>
@@ -190,12 +190,12 @@ export function ActivityView({ live }: { live: boolean }) {
               ))}
           </select>
           <div className="relative">
-            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
               value={q}
               onChange={(e) => resetAnd(() => setQ(e.target.value))}
               placeholder="Cari pesan log…"
-              className="h-8 w-44 border-zinc-800 bg-zinc-900 pl-7 text-xs"
+              className="h-8 w-44 border-border bg-card pl-7 text-xs"
             />
           </div>
           <Button
@@ -203,7 +203,7 @@ export function ActivityView({ live }: { live: boolean }) {
             size="sm"
             onClick={download}
             disabled={!data || rows.length === 0}
-            className="h-8 gap-1.5 border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+            className="h-8 gap-1.5 border-border bg-card text-foreground/90 hover:bg-accent"
             title="Download log yang sedang tampil sebagai .log"
           >
             <Download className="h-3.5 w-3.5" />
@@ -213,25 +213,25 @@ export function ActivityView({ live }: { live: boolean }) {
       </div>
 
       {/* Terminal */}
-      <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 shadow-inner">
-        <div className="flex items-center gap-2 border-b border-zinc-800/80 bg-zinc-900/70 px-4 py-2">
-          <TerminalSquare className="h-4 w-4 text-amber-400" />
-          <p className="font-mono text-xs font-semibold text-zinc-300">activity.log</p>
-          <span className="flex items-center gap-1.5 font-mono text-[10px] text-zinc-500">
+      <div className="overflow-hidden rounded-xl border border-border bg-background dark:bg-zinc-950 shadow-inner">
+        <div className="flex items-center gap-2 border-b border-border/60 bg-card/70 px-4 py-2">
+          <TerminalSquare className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+          <p className="font-mono text-xs font-semibold text-foreground/90">activity.log</p>
+          <span className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
             {live && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />}
             {live ? "streaming…" : "paused"}
           </span>
-          <span className="ml-auto font-mono text-[10px] tabular-nums text-zinc-500">
+          <span className="ml-auto font-mono text-[10px] tabular-nums text-muted-foreground">
             {loading ? "sync…" : `${rows.length.toLocaleString("id-ID")} / ${data?.total.toLocaleString("id-ID") ?? 0} log`}
           </span>
         </div>
 
         {/* load older */}
         {hasOlder && (
-          <div className="flex justify-center border-b border-zinc-800/60 bg-zinc-900/30 py-1.5">
+          <div className="flex justify-center border-b border-border/60 bg-card/30 py-1.5">
             <button
               onClick={() => setLimit((l) => l + PAGE)}
-              className="flex items-center gap-1.5 rounded px-3 py-1 font-mono text-[11px] text-zinc-500 transition-colors hover:bg-zinc-800/60 hover:text-zinc-300"
+              className="flex items-center gap-1.5 rounded px-3 py-1 font-mono text-[11px] text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground/90"
             >
               <ArrowUpToLine className="h-3 w-3" />
               load older logs ({(data!.total - data!.logs.length).toLocaleString("id-ID")} tersisa)
@@ -245,21 +245,21 @@ export function ActivityView({ live }: { live: boolean }) {
           className="h-[calc(100vh-320px)] min-h-[320px] overflow-y-auto px-3 py-2 font-mono text-[11px] leading-relaxed [scrollbar-width:thin]"
         >
           {rows.length === 0 ? (
-            <p className="py-10 text-center text-zinc-600">
+            <p className="py-10 text-center text-muted-foreground/80">
               {loading ? "memuat log…" : "Tidak ada log yang cocok dengan filter"}
             </p>
           ) : (
             rows.map((log) => (
-              <div key={log.id} className="flex gap-2 rounded px-1.5 py-[3px] hover:bg-zinc-900/70">
+              <div key={log.id} className="flex gap-2 rounded px-1.5 py-[3px] hover:bg-card/70">
                 <span className={cn("mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full", STATUS_DOT[log.status] ?? "bg-zinc-500")} />
-                <span className="shrink-0 tabular-nums text-zinc-600">{stamp(log.ts)}</span>
+                <span className="shrink-0 tabular-nums text-muted-foreground/80">{stamp(log.ts)}</span>
                 <span className="w-16 shrink-0">
                   <LogActionColor action={log.action} />
                 </span>
-                <span className="shrink-0 text-zinc-500">[{log.source ?? "system"}]</span>
-                <span className={cn("min-w-0 flex-1 break-words", STATUS_TEXT[log.status] ?? "text-zinc-300")}>
+                <span className="shrink-0 text-muted-foreground">[{log.source ?? "system"}]</span>
+                <span className={cn("min-w-0 flex-1 break-words", STATUS_TEXT[log.status] ?? "text-foreground/90")}>
                   {log.message}
-                  {log.durationMs !== null && <span className="ml-1 text-zinc-600">({(log.durationMs / 1000).toFixed(2)}s)</span>}
+                  {log.durationMs !== null && <span className="ml-1 text-muted-foreground/80">({(log.durationMs / 1000).toFixed(2)}s)</span>}
                 </span>
               </div>
             ))
@@ -267,8 +267,8 @@ export function ActivityView({ live }: { live: boolean }) {
         </div>
 
         {/* footer / follow bar */}
-        <div className="flex items-center gap-2 border-t border-zinc-800/80 bg-zinc-900/70 px-4 py-1.5">
-          <span className="font-mono text-[10px] text-zinc-600">
+        <div className="flex items-center gap-2 border-t border-border/60 bg-card/70 px-4 py-1.5">
+          <span className="font-mono text-[10px] text-muted-foreground/80">
             {action !== "all" && `action:${action} `}
             {status !== "all" && `status:${status} `}
             {source !== "all" && `source:${source} `}
@@ -283,7 +283,7 @@ export function ActivityView({ live }: { live: boolean }) {
             ) : (
               <button
                 onClick={jumpToLatest}
-                className="flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 font-mono text-[10px] text-zinc-300 transition-colors hover:border-zinc-600"
+                className="flex items-center gap-1.5 rounded border border-border bg-card px-2 py-0.5 font-mono text-[10px] text-foreground/90 transition-colors hover:border-zinc-600"
               >
                 <ArrowDownToLine className="h-3 w-3" /> jump to latest
               </button>

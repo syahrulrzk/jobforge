@@ -138,7 +138,10 @@ export interface ValidationResult {
 export function validateJob(input: ValidationInput): ValidationResult {
   const missing: string[] = [];
   if (!input.companyName) missing.push("Company Name");
-  if (!input.companyLogoUrl) missing.push("Company Logo URL");
+  // Company Logo URL — kosmetik, TIDAK blocking (§11 fallback UI: stored URL
+  // → /api/logo proxy → initials; kartu JobStreet/Glints tidak mengekspos
+  // logo, jadi memblokir READY di sini cuma menahan job ber-email valid
+  // tanpa alasan fungsional).
   if (!input.companyProfile) missing.push("Company Profile");
   if (!input.title) missing.push("Job Title");
   if (!input.description || input.description.length < 30) missing.push("Job Description");
@@ -158,7 +161,7 @@ export function validateJob(input: ValidationInput): ValidationResult {
     return { ready: true, outcome: "READY", missing: [], reason: "All mandatory fields satisfied" };
   }
   const critical = missing.filter(
-    (f) => !["Company Logo URL", "HR Email"].includes(f)
+    (f) => !["HR Email"].includes(f)
   );
   if (critical.length > 0) {
     return {

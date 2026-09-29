@@ -20,6 +20,12 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     orderBy: { createdAt: "desc" },
     take: 20,
   });
+  // email harvest (Domain Search) — company bisa punya email tanpa job
+  const harvested = await db.harvestedContact.findMany({
+    where: { companyId: company.id },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+  });
   const sources = await db.jobSource.findMany({
     where: { job: { companyId: company.id } },
     include: { source: { select: { name: true, slug: true } } },
@@ -36,6 +42,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
       website: company.website,
       profile: company.profile,
       industry: company.industry,
+      size: company.size,
       enrichedAt: company.enrichedAt,
       createdAt: company.createdAt,
     },
@@ -51,6 +58,14 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
       emailStatus: c.emailStatus,
       emailVerified: c.emailVerified,
       jobTitle: c.job.title,
+    })),
+    harvested: harvested.map((h) => ({
+      email: h.email,
+      kind: h.kind,
+      category: h.category,
+      via: h.via,
+      sourceUrl: h.sourceUrl,
+      createdAt: h.createdAt,
     })),
     sources: sources.map((s) => ({ name: s.source.name, slug: s.source.slug })),
   });

@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -113,6 +112,12 @@
 }
 
 @layer base {
+  /* base font 14px (default browser 16px) — semua ukuran Tailwind berbasis rem
+     (text-*, p-*, h-*, gap-*, dll) ikut menyusut proporsional di seluruh halaman.
+     Mau lebih kecil/lagi? turunkan angkanya (mis. 84% = ±13.4px), lebih besar → naikkan. */
+  html {
+    font-size: 87.5%;
+  }
   * {
     @apply border-border outline-ring/50;
   }
@@ -121,10 +126,10 @@
   }
 }
 
-/* JobForge — slim dark scrollbars */
+/* JobForge — slim scrollbars (mengikuti tema: zinc token) */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #3f3f46 transparent;
+  scrollbar-color: var(--sidebar-ring) transparent;
 }
 *::-webkit-scrollbar {
   width: 6px;
@@ -134,9 +139,9 @@
   background: transparent;
 }
 *::-webkit-scrollbar-thumb {
-  background-color: #3f3f46;
+  background-color: var(--sidebar-ring);
   border-radius: 3px;
 }
 *::-webkit-scrollbar-thumb:hover {
-  background-color: #52525b;
+  background-color: var(--muted-foreground);
 }

@@ -1,0 +1,20 @@
+FROM oven/bun:1.4-alpine
+
+WORKDIR /app
+
+# Install dependencies
+COPY package.json bun.lockb ./
+RUN bun install --production
+
+# Copy scheduler and packages
+COPY services/scheduler ./services/scheduler
+COPY packages ./packages
+COPY prisma ./prisma
+
+# Generate Prisma client
+RUN cd prisma && bunx prisma generate
+
+WORKDIR /app/services/scheduler
+
+# Start scheduler
+CMD ["bun", "run", "dev"]

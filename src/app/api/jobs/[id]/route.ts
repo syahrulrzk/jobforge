@@ -97,6 +97,9 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
   return NextResponse.json({
     job: {
       id: job.id,
+      code: job.code || null,
+      pulledAt: job.pulledAt,
+      pullLeaseUntil: job.pullLeaseUntil,
       title: job.title,
       description: job.description,
       status: job.status,
