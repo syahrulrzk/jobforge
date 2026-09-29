@@ -12,6 +12,10 @@ COPY prisma ./prisma
 COPY public ./public
 COPY next.config.ts ./
 COPY tsconfig.json ./
+# WAJIB: tanpa postcss.config.mjs, plugin @tailwindcss/postcss tidak jalan
+# saat next build → CSS dihasilkan tanpa utility classes (halaman polos).
+COPY postcss.config.mjs ./
+COPY tailwind.config.ts ./
 
 # DATABASE_URL placeholder untuk build (runtime dipakai dari environment compose).
 # Prisma client wajib di-generate setelah schema tersedia.
