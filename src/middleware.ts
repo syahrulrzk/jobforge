@@ -10,13 +10,18 @@ const PUBLIC_PATHS = ["/login", "/api/auth/login", "/api/auth/logout"];
 
 function isPublic(pathname: string): boolean {
   if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"))) return true;
-  // Static assets Next.js
+  // Static assets Next.js + file metadata (favicon/robots/sitemap/manifest)
+  // — semua ekstensi aset publik di root harus di-loloskan agar favicon,
+  // robots.txt, dll tidak terbawa redirect login.
   if (
     pathname.startsWith("/_next/") ||
     pathname === "/favicon.ico" ||
-    pathname.startsWith("/logo") ||
-    pathname.startsWith("/icons/") ||
-    pathname.startsWith("/images/")
+    pathname === "/robots.txt" ||
+    pathname === "/sitemap.xml" ||
+    pathname === "/manifest.json" ||
+    pathname === "/icon.svg" ||
+    pathname === "/apple-icon.png" ||
+    /\.(svg|png|jpg|jpeg|gif|webp|ico|txt|xml|webmanifest|woff2?)$/i.test(pathname)
   ) {
     return true;
   }
